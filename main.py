@@ -485,9 +485,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         role = str(getattr(sender, "role", "") or "").lower()
         admin_roles = [
             x.lower()
-            for x in _norm_list(
-                self.config.get("bdw_admin_role", ["owner", "admin"])
-            )
+            for x in _norm_list(self.config.get("bdw_admin_role", ["owner", "admin"]))
         ]
         if role and role in admin_roles:
             return None
