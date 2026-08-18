@@ -27,6 +27,7 @@
    - 按 `F12` → `Application` → `Cookies` → `https://www.bilibili.com`
    - 复制 `SESSDATA` 的值，填到插件配置 `bdw_sessdata`
    - `SESSDATA` 有效期约半年，失效后需重新获取（收到 code=-101 提示时即过期）
+   - 注意：Cookie 列表里可能出现两条 `SESSDATA`（`.bilibili.com` 和 `.biligame.com` 域各一条），**请选择 Domain 为 `.bilibili.com` 的那条**（动态接口属于 bilibili.com 域；`.biligame.com` 那条是 B 站游戏站的，填了无效）
 2. **（可选）获取 `buvid3`**：同样位置复制，填到 `bdw_buvid3`，可辅助降低风控概率
 3. **关注目标账号**：用关注号在 B 站关注所有要监听的 UP 主
 4. **获取目标 UID**：UP 主个人空间地址 `https://space.bilibili.com/<UID>` 中的数字
@@ -104,8 +105,11 @@ python plugins/astrbot/siwu-bili-dynamic-watcher-1_0/build.py
 - 把 `bdw_platform_id` 改为对应适配器 ID（如 `telegram`），`bdw_groups` 填平台群会话 ID。
 - 注意：QQ 官方接口平台不支持主动推送（AstrBot 限制），请使用 OneBot v11（go-cqhttp / NapCat / Lagrange 等）或支持主动消息的平台。
 
+**Cookie 里有两条 SESSDATA，填哪条？**
+- 选 **Domain 为 `.bilibili.com`** 的那条（通常 Cookie 列表里靠后的那条）；`.biligame.com` 的是游戏站登录态，动态接口不认。两条值很相似但中间段不同，不要填错。
+
 **SESSDATA 安全提示**
-- `SESSDATA` 等于关注号的登录凭证，明文保存在 AstrBot 配置文件中，请妥善保管服务器权限，**建议使用小号**，不要把主账号凭证填入。
+- `SESSDATA` 等于关注号的登录凭证，明文保存在 AstrBot 配置文件中，请妥善保管服务器权限，**建议使用小号**，不要把主账号凭证填入；也不要把它粘贴到聊天/论坛等第三方环境，测试完可去 B 站「设置 → 安全中心」清除登录态使其失效。
 
 ## 依赖
 
