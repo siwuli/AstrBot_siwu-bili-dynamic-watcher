@@ -108,6 +108,11 @@ python plugins/astrbot/siwu-bili-dynamic-watcher-1_0/build.py
 **Cookie 里有两条 SESSDATA，填哪条？**
 - 选 **Domain 为 `.bilibili.com`** 的那条（通常 Cookie 列表里靠后的那条）；`.biligame.com` 的是游戏站登录态，动态接口不认。两条值很相似但中间段不同，不要填错。
 
+**在 space/message/www 等多个子域下都看到 SESSDATA？**
+- 若这些行的 **Domain 列都是 `.bilibili.com`（带点）**：它们是同一条域级 Cookie 在不同来源下的重复展示，值相同，任选一条填即可。
+- 若 Domain 列是 `space.bilibili.com` / `message.bilibili.com` 这类**不带点**的主机级 Cookie：子域专属，**不会**被发送到 `api.bilibili.com`，填了无效。
+- 最稳做法：F12 → Network → 刷新页面，点开任意 `api.bilibili.com` 请求 → Request Headers → Cookie 中找 `SESSDATA=xxx`，该值就是接口实际携带的登录态。
+
 **SESSDATA 安全提示**
 - `SESSDATA` 等于关注号的登录凭证，明文保存在 AstrBot 配置文件中，请妥善保管服务器权限，**建议使用小号**，不要把主账号凭证填入；也不要把它粘贴到聊天/论坛等第三方环境，测试完可去 B 站「设置 → 安全中心」清除登录态使其失效。
 
