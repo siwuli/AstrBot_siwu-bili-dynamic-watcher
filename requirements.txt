@@ -1,0 +1,2 @@
+# 使用 aiohttp 访问 B 站接口（AstrBot 环境自带，插件安装时自动校验/安装）
+aiohttp

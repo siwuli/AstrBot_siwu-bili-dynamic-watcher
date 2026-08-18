@@ -1,0 +1,86 @@
+{
+  "bdw_enabled": {
+    "description": "启用B站动态监听",
+    "hint": "关闭后停止轮询，不再推送新动态",
+    "type": "bool",
+    "default": true
+  },
+  "bdw_mode": {
+    "description": "拉取模式",
+    "hint": "follow=关注流（推荐，需填写 bdw_sessdata，且关注号需在B站关注目标账号）；space=空间轮询（免登录，高频访问易被风控，仅建议少量账号+大间隔）",
+    "type": "string",
+    "default": "follow"
+  },
+  "bdw_sessdata": {
+    "description": "B站登录 Cookie（SESSDATA）",
+    "hint": "关注号的登录态。浏览器登录 bilibili.com 后 F12 → Application → Cookies → 复制 SESSDATA 值。有效期内建议定期更新",
+    "type": "string",
+    "default": ""
+  },
+  "bdw_buvid3": {
+    "description": "B站 Cookie（buvid3，可选）",
+    "hint": "浏览器 Cookie 中的 buvid3，辅助降低风控概率，留空也可运行",
+    "type": "string",
+    "default": ""
+  },
+  "bdw_uid_list": {
+    "description": "初始监听 UID 列表",
+    "hint": "每行一个B站 UID（UP主的 mid）。仅在首次加载时写入本地监听列表，之后用「bd添加 / bd删除」指令管理。关注流模式需用关注号关注这些账号",
+    "type": "list",
+    "default": []
+  },
+  "bdw_groups": {
+    "description": "推送目标 QQ 群号",
+    "hint": "每行一个 QQ 群号，新动态会推送到这些群",
+    "type": "list",
+    "default": []
+  },
+  "bdw_platform_id": {
+    "description": "推送平台适配器 ID",
+    "hint": "默认 aiocqhttp（OneBot v11，如 go-cqhttp / NapCat / Lagrange）。使用其他平台时改为对应适配器 ID（如 telegram）",
+    "type": "string",
+    "default": "aiocqhttp"
+  },
+  "bdw_poll_interval": {
+    "description": "轮询间隔（秒）",
+    "hint": "每次拉取动态的间隔。follow 模式默认 60 秒即可；space 模式建议 120 秒以上",
+    "type": "int",
+    "default": 60
+  },
+  "bdw_max_per_cycle": {
+    "description": "每轮最多推送条数",
+    "hint": "单次轮询发现的新动态超过该值时只推送最新的 N 条，防止刷屏（其余会被记为已见）",
+    "type": "int",
+    "default": 10
+  },
+  "bdw_timeout": {
+    "description": "接口请求超时（秒）",
+    "hint": "单次请求 B 站接口的超时时间",
+    "type": "int",
+    "default": 15
+  },
+  "bdw_proxy": {
+    "description": "HTTP 代理（可选）",
+    "hint": "如 http://127.0.0.1:7890；留空直连",
+    "type": "string",
+    "default": ""
+  },
+  "bdw_permission_enabled": {
+    "description": "启用管理指令权限校验",
+    "hint": "开启后，bd添加 / bd删除 / bd测试 仅允许 bdw_admin_ids 白名单或群内 bdw_admin_role 角色执行；bd列表 / bd状态 所有人可用",
+    "type": "bool",
+    "default": true
+  },
+  "bdw_admin_ids": {
+    "description": "管理指令用户 ID 白名单",
+    "hint": "平台用户 ID（如 QQ 号），每行一个。私聊消息无群角色，只能靠此白名单放行",
+    "type": "list",
+    "default": []
+  },
+  "bdw_admin_role": {
+    "description": "群内管理指令角色",
+    "hint": "QQ 平台群主 owner、管理员 admin；留空则群消息仅按 bdw_admin_ids 白名单放行",
+    "type": "list",
+    "default": ["owner", "admin"]
+  }
+}
