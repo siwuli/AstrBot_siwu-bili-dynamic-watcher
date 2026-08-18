@@ -148,7 +148,14 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._lock: asyncio.Lock | None = None
         self._seen: set[str] = set()
         self._watching: dict[str, str] = {}  # uid -> 备注
-        self._last_poll: dict = {"time": 0, "new": 0, "error": ""}
+        self._warmup_pending = False
+        self._last_poll: dict = {
+            "time": 0,
+            "new": 0,
+            "pushed_ok": 0,
+            "pushed_fail": 0,
+            "error": "",
+        }
 
     # ------------------------------------------------------------------
     # 生命周期：插件加载时启动轮询，卸载时停止
@@ -157,6 +164,11 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._lock = asyncio.Lock()
         self._load_watch_list()
         self._load_seen()
+        # 首次安装（本地没有已见记录）时启用预热：第一轮只记录历史动态、不推送，
+        # 避免安装后立刻把目标账号的历史动态刷屏到群里（bdw_warmup 可关闭）
+        self._warmup_pending = bool(
+            self.config.get("bdw_warmup", True)
+        ) and not os.path.exists(SEEN_FILE)
         self._http = BiliDynamicClient(
             sessdata=str(self.config.get("bdw_sessdata", "") or ""),
             buvid3=str(self.config.get("bdw_buvid3", "") or ""),
@@ -221,8 +233,34 @@ class BiliDynamicWatcherPlugin(star.Star):
             return
 
         new_items = self._select_new_items(items, watched)
+
+        # 预热：首次成功拉取时，把当前已有的动态全部记为已见但不推送
+        if self._warmup_pending:
+            self._warmup_pending = False
+            if new_items:
+                self._record_seen([str(it.get("id_str")) for it in new_items])
+                self._last_poll.update(
+                    time=time_now(),
+                    new=len(new_items),
+                    pushed_ok=0,
+                    pushed_fail=0,
+                    error="",
+                )
+                logger.info(
+                    "B站动态监听预热完成：已记录 %d 条历史动态（不推送），"
+                    "之后只推送新发布的动态",
+                    len(new_items),
+                )
+            else:
+                self._last_poll.update(
+                    time=time_now(), new=0, pushed_ok=0, pushed_fail=0, error=""
+                )
+            return
+
         if not new_items:
-            self._last_poll.update(time=time_now(), new=0, error="")
+            self._last_poll.update(
+                time=time_now(), new=0, pushed_ok=0, pushed_fail=0, error=""
+            )
             return
 
         # 按发布时间倒序，取最新的 N 条推送
@@ -240,10 +278,16 @@ class BiliDynamicWatcherPlugin(star.Star):
             ),
         )
         to_push = new_items[:limit]
+        pushed_ok = 0
+        pushed_fail = 0
         for item in to_push:
             try:
-                await self._push_to_groups(format_dynamic(item))
+                if await self._push_to_groups(format_dynamic(item)):
+                    pushed_ok += 1
+                else:
+                    pushed_fail += 1
             except Exception as e:  # noqa: BLE001
+                pushed_fail += 1
                 logger.error("推送B站动态失败: %s", e)
 
         # 本轮所有新动态都记为已见（包括超出推送上限的），避免下轮重复
@@ -251,10 +295,15 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._last_poll.update(
             time=time_now(),
             new=len(new_items),
+            pushed_ok=pushed_ok,
+            pushed_fail=pushed_fail,
             error="",
         )
         logger.info(
-            "B站动态轮询：发现 %d 条新动态，推送 %d 条", len(new_items), len(to_push)
+            "B站动态轮询：发现 %d 条新动态，推送成功 %d 条，失败 %d 条",
+            len(new_items),
+            pushed_ok,
+            pushed_fail,
         )
 
     async def _fetch_latest_items(self, mode: str) -> list[dict]:
@@ -272,10 +321,10 @@ class BiliDynamicWatcherPlugin(star.Star):
         data = await self._http.fetch_follow_feed()
         return (data.get("data") or {}).get("items") or []
 
-    def _select_new_items(
+    def _items_of_watched(
         self, items: list[dict], watched: dict[str, str]
     ) -> list[dict]:
-        """过滤出监听账号的、且未推送过的动态。"""
+        """过滤出属于监听账号的动态（不管是否已见）。"""
         out = []
         for item in items or []:
             modules = item.get("modules") or {}
@@ -284,25 +333,34 @@ class BiliDynamicWatcherPlugin(star.Star):
             did = str(item.get("id_str") or "").strip()
             if not uid or not did:
                 continue
-            if uid not in watched:
-                continue
-            if did in self._seen:
-                continue
-            out.append(item)
+            if uid in watched:
+                out.append(item)
         return out
+
+    def _select_new_items(
+        self, items: list[dict], watched: dict[str, str]
+    ) -> list[dict]:
+        """过滤出监听账号的、且未推送过的动态。"""
+        return [
+            it
+            for it in self._items_of_watched(items, watched)
+            if str(it.get("id_str") or "").strip() not in self._seen
+        ]
 
     # ------------------------------------------------------------------
     # 推送
     # ------------------------------------------------------------------
-    async def _push_to_groups(self, text: str) -> None:
+    async def _push_to_groups(self, text: str) -> bool:
+        """推送动态到所有目标群。返回是否有至少一个群发送成功。"""
         groups = _norm_list(self.config.get("bdw_groups"))
         if not groups:
             logger.warning("未配置推送目标群（bdw_groups），动态未发送：%s", text[:60])
-            return
+            return False
         platform_id = str(
             self.config.get("bdw_platform_id", "aiocqhttp") or "aiocqhttp"
         ).strip()
         chain = MessageChain().message(text)
+        sent = 0
         for gid in groups:
             if not gid.isdigit():
                 logger.warning("跳过非数字群号: %s", gid)
@@ -310,7 +368,9 @@ class BiliDynamicWatcherPlugin(star.Star):
             session = f"{platform_id}:{MessageType.GROUP_MESSAGE.value}:{gid}"
             try:
                 ok = await self.context.send_message(session, chain)
-                if not ok:
+                if ok:
+                    sent += 1
+                else:
                     logger.warning(
                         "推送群 %s 失败：找不到平台 %s（检查 bdw_platform_id）",
                         gid,
@@ -318,6 +378,7 @@ class BiliDynamicWatcherPlugin(star.Star):
                     )
             except Exception as e:  # noqa: BLE001
                 logger.error("推送群 %s 失败: %s", gid, e)
+        return sent > 0
 
     # ------------------------------------------------------------------
     # 指令（免 LLM）
@@ -410,6 +471,7 @@ class BiliDynamicWatcherPlugin(star.Star):
             if not last.get("time")
             else (
                 f"{last['time']} 发现 {last['new']} 条新动态"
+                f"（推送成功 {last.get('pushed_ok', 0)}，失败 {last.get('pushed_fail', 0)}）"
                 + (f"（错误：{last['error']}）" if last.get("error") else "")
             )
         )
@@ -448,14 +510,24 @@ class BiliDynamicWatcherPlugin(star.Star):
             event.stop_event()
             yield event.make_result().message(f"拉取失败：{e}")
             return
+        matched_all = self._items_of_watched(items, watched)
         matched = self._select_new_items(items, watched)
         event.stop_event()
         if not matched:
-            yield event.make_result().message(
-                f"拉取成功（模式 {mode}），接口返回 {len(items)} 条动态，"
-                "其中没有监听账号的未推送新动态。\n"
-                "可能原因：关注号未关注目标账号 / SESSDATA 过期 / 该账号近期无新动态。"
-            )
+            if matched_all:
+                yield event.make_result().message(
+                    f"拉取成功（模式 {mode}），接口返回 {len(items)} 条动态，"
+                    f"其中 {len(matched_all)} 条属于监听账号，但都已在「已记录动态」中"
+                    "（此前轮询已处理/推送），属正常。等目标账号发布新动态即可看到推送。"
+                )
+            else:
+                yield event.make_result().message(
+                    f"拉取成功（模式 {mode}），接口返回 {len(items)} 条动态，"
+                    "其中没有属于监听账号的动态。\n"
+                    "请检查：关注号是否已关注目标账号 / SESSDATA 是否有效"
+                    "（浏览器访问 https://api.bilibili.com/x/web-interface/nav 看 code 是否为 0）"
+                    " / UID 是否填写正确。"
+                )
             return
         lines = [f"拉取成功（模式 {mode}），发现 {len(matched)} 条未推送新动态："]
         for item in matched[:10]:

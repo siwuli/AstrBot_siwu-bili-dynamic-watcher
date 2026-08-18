@@ -3,7 +3,7 @@ display_name: B站动态监听
 short_desc: 监听B站UP主动态，新动态自动推送QQ群（关注流模式，免LLM）
 desc: "监听指定 B 站 UP 主的动态，新动态自动推送到配置的 QQ 群。推荐使用「关注流」模式：用一个已关注目标账号的 B 站账号（SESSDATA 登录态）拉取关注动态流，避免逐个主页高频轮询触发风控；纯后台轮询 + 主动推送，不依赖 LLM"
 help: "指令：bd列表 / bd添加 <UID> [备注] / bd删除 <UID> / bd状态 / bd测试（需 @ 或唤醒词；管理指令需管理员权限）"
-version: 1.0.0
+version: 1.0.1
 author: siwuli
 repo: https://github.com/siwuli/AstrBot_siwu-bili-dynamic-watcher
 astrbot_version: ">=4.0.0"

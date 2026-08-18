@@ -2,7 +2,7 @@
 
 监听指定 B 站账号（UP主）的最新动态，**新动态自动推送到配置的 QQ 群**。纯后台轮询 + 主动推送，**不依赖 LLM**，对话不会被打扰。
 
-> 插件 id：`bili_dynamic_watcher`　当前版本：`1.0.0`
+> 插件 id：`bili_dynamic_watcher`　当前版本：`1.0.1`
 
 ## 工作原理
 
@@ -49,6 +49,7 @@
 | `bdw_sessdata` | 关注号登录 Cookie（SESSDATA），follow 模式必填 | 空 |
 | `bdw_buvid3` | 浏览器 Cookie buvid3（可选，辅助防风控） | 空 |
 | `bdw_uid_list` | 初始监听 UID 列表（每行一个；仅首次加载时写入） | `[]` |
+| `bdw_warmup` | 首次启动预热：只记录历史动态不推送，之后只推新动态 | `true` |
 | `bdw_groups` | 推送目标 QQ 群号（每行一个） | `[]` |
 | `bdw_platform_id` | 推送平台适配器 ID（默认 `aiocqhttp`，即 OneBot v11） | `aiocqhttp` |
 | `bdw_poll_interval` | 轮询间隔（秒），follow 默认 60，space 建议 ≥120 | `60` |
@@ -112,6 +113,13 @@ python plugins/astrbot/siwu-bili-dynamic-watcher-1_0/build.py
 - 若这些行的 **Domain 列都是 `.bilibili.com`（带点）**：它们是同一条域级 Cookie 在不同来源下的重复展示，值相同，任选一条填即可。
 - 若 Domain 列是 `space.bilibili.com` / `message.bilibili.com` 这类**不带点**的主机级 Cookie：子域专属，**不会**被发送到 `api.bilibili.com`，填了无效。
 - 最稳做法：F12 → Network → 刷新页面，点开任意 `api.bilibili.com` 请求 → Request Headers → Cookie 中找 `SESSDATA=xxx`，该值就是接口实际携带的登录态。
+
+**首次安装推送了一堆历史动态？**
+- 默认已开启 `bdw_warmup`：首次启动（本地没有已见记录时）第一轮会把目标账号已有的历史动态记为已见、不推送，之后只推送新发布的动态。若希望首次也推送历史动态，把 `bdw_warmup` 改为 `false`。
+
+**`bd测试` 说「没有未推送新动态」？**
+- 若提示「X 条属于监听账号但都已在已记录动态中」= 正常，说明此前轮询已处理过这些动态，等目标账号发布新动态即可；
+- 若提示「没有属于监听账号的动态」= 检查关注号是否已关注目标 / SESSDATA 是否有效 / UID 是否正确。
 
 **SESSDATA 安全提示**
 - `SESSDATA` 等于关注号的登录凭证，明文保存在 AstrBot 配置文件中，请妥善保管服务器权限，**建议使用小号**，不要把主账号凭证填入；也不要把它粘贴到聊天/论坛等第三方环境，测试完可去 B 站「设置 → 安全中心」清除登录态使其失效。

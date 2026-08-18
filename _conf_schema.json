@@ -29,6 +29,12 @@
     "type": "list",
     "default": []
   },
+  "bdw_warmup": {
+    "description": "首次启动预热（不推送历史动态）",
+    "hint": "开启后，首次安装/重装后第一轮只把已存在的历史动态记为已见、不推送，之后只推新发布的动态；关闭则首次也会推送最近的历史动态",
+    "type": "bool",
+    "default": true
+  },
   "bdw_groups": {
     "description": "推送目标 QQ 群号",
     "hint": "每行一个 QQ 群号，新动态会推送到这些群",
