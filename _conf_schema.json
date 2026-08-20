@@ -42,10 +42,10 @@
     "default": []
   },
   "bdw_platform_id": {
-    "description": "推送平台适配器 ID",
-    "hint": "默认 aiocqhttp（OneBot v11，如 go-cqhttp / NapCat / Lagrange）。使用其他平台时改为对应适配器 ID（如 telegram）",
+    "description": "推送平台适配器 ID（留空自动探测）",
+    "hint": "留空时插件自动探测当前运行的平台适配器 ID（推荐，无需手动填）；多平台同时运行时，填要推送的那个适配器 ID（可用 bd状态 查看探测结果）",
     "type": "string",
-    "default": "aiocqhttp"
+    "default": ""
   },
   "bdw_poll_interval": {
     "description": "轮询间隔（秒）",

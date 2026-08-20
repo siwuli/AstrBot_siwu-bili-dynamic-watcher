@@ -2,7 +2,7 @@
 
 监听指定 B 站账号（UP主）的最新动态，**新动态自动推送到配置的 QQ 群**。纯后台轮询 + 主动推送，**不依赖 LLM**，对话不会被打扰。
 
-> 插件 id：`bili_dynamic_watcher`　当前版本：`1.0.1`
+> 插件 id：`bili_dynamic_watcher`　当前版本：`1.0.2`
 
 ## 工作原理
 
@@ -51,7 +51,7 @@
 | `bdw_uid_list` | 初始监听 UID 列表（每行一个；仅首次加载时写入） | `[]` |
 | `bdw_warmup` | 首次启动预热：只记录历史动态不推送，之后只推新动态 | `true` |
 | `bdw_groups` | 推送目标 QQ 群号（每行一个） | `[]` |
-| `bdw_platform_id` | 推送平台适配器 ID（默认 `aiocqhttp`，即 OneBot v11） | `aiocqhttp` |
+| `bdw_platform_id` | 推送平台适配器 ID（**留空自动探测**，推荐；多平台时填指定 ID） | 空（自动） |
 | `bdw_poll_interval` | 轮询间隔（秒），follow 默认 60，space 建议 ≥120 | `60` |
 | `bdw_max_per_cycle` | 每轮最多推送条数（防刷屏） | `10` |
 | `bdw_timeout` | 接口请求超时（秒） | `15` |
@@ -116,6 +116,10 @@ python plugins/astrbot/siwu-bili-dynamic-watcher-1_0/build.py
 
 **首次安装推送了一堆历史动态？**
 - 默认已开启 `bdw_warmup`：首次启动（本地没有已见记录时）第一轮会把目标账号已有的历史动态记为已见、不推送，之后只推送新发布的动态。若希望首次也推送历史动态，把 `bdw_warmup` 改为 `false`。
+
+**`bd状态` 显示推送失败，日志提示 cannot find platform？**
+- 通常是 `bdw_platform_id` 与实际平台适配器 ID 不一致（例如你的 OneBot 适配器 ID 是 `AstrBot` 而不是 `aiocqhttp`）。
+- v1.0.2 起插件**自动探测平台 ID**：把 `bdw_platform_id` 留空，重载插件后用 `bd状态` 查看「推送平台」是否显示正确。
 
 **`bd测试` 说「没有未推送新动态」？**
 - 若提示「X 条属于监听账号但都已在已记录动态中」= 正常，说明此前轮询已处理过这些动态，等目标账号发布新动态即可；

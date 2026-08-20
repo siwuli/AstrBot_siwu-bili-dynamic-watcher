@@ -146,6 +146,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._task: asyncio.Task | None = None
         self._http: BiliDynamicClient | None = None
         self._lock: asyncio.Lock | None = None
+        self._platform_ids: list[str] = []
         self._seen: set[str] = set()
         self._watching: dict[str, str] = {}  # uid -> 备注
         self._warmup_pending = False
@@ -169,6 +170,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._warmup_pending = bool(
             self.config.get("bdw_warmup", True)
         ) and not os.path.exists(SEEN_FILE)
+        self._platform_ids = self._detect_platform_ids()
         self._http = BiliDynamicClient(
             sessdata=str(self.config.get("bdw_sessdata", "") or ""),
             buvid3=str(self.config.get("bdw_buvid3", "") or ""),
@@ -356,29 +358,56 @@ class BiliDynamicWatcherPlugin(star.Star):
         if not groups:
             logger.warning("未配置推送目标群（bdw_groups），动态未发送：%s", text[:60])
             return False
-        platform_id = str(
-            self.config.get("bdw_platform_id", "aiocqhttp") or "aiocqhttp"
-        ).strip()
+        candidates = self._push_platform_candidates()
         chain = MessageChain().message(text)
         sent = 0
         for gid in groups:
             if not gid.isdigit():
                 logger.warning("跳过非数字群号: %s", gid)
                 continue
-            session = f"{platform_id}:{MessageType.GROUP_MESSAGE.value}:{gid}"
-            try:
-                ok = await self.context.send_message(session, chain)
+            for pid in candidates:
+                session = f"{pid}:{MessageType.GROUP_MESSAGE.value}:{gid}"
+                try:
+                    ok = await self.context.send_message(session, chain)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("推送群 %s（平台 %s）失败: %s", gid, pid, e)
+                    continue
                 if ok:
                     sent += 1
-                else:
-                    logger.warning(
-                        "推送群 %s 失败：找不到平台 %s（检查 bdw_platform_id）",
-                        gid,
-                        platform_id,
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.error("推送群 %s 失败: %s", gid, e)
+                    break
+                logger.warning(
+                    "推送群 %s 失败：平台 %s 未匹配到运行中的适配器（可留空 bdw_platform_id 自动探测）",
+                    gid,
+                    pid,
+                )
         return sent > 0
+
+    def _push_platform_candidates(self) -> list[str]:
+        """推送时尝试的平台 ID 列表：优先配置值，其次自动探测到的平台 ID。"""
+        configured = str(self.config.get("bdw_platform_id", "") or "").strip()
+        candidates: list[str] = []
+        for pid in ([configured] if configured else []) + self._platform_ids:
+            if pid and pid not in candidates:
+                candidates.append(pid)
+        if not candidates:
+            candidates = ["aiocqhttp"]
+        return candidates
+
+    def _detect_platform_ids(self) -> list[str]:
+        """自动探测当前运行中的平台适配器 ID，用于主动推送。"""
+        ids: list[str] = []
+        pm = getattr(self.context, "platform_manager", None)
+        insts = getattr(pm, "platform_insts", None) if pm else None
+        for p in insts or []:
+            try:
+                meta = p.meta()
+                pid = str(getattr(meta, "id", "") or "")
+                if pid and pid not in ids:
+                    ids.append(pid)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("探测平台 ID 失败: %s", e)
+                continue
+        return ids
 
     # ------------------------------------------------------------------
     # 指令（免 LLM）
@@ -483,7 +512,7 @@ class BiliDynamicWatcherPlugin(star.Star):
             f"- 轮询间隔：{self.config.get('bdw_poll_interval', 60)} 秒",
             f"- 监听账号：{len(watched)} 个",
             f"- 推送群：{len(groups)} 个（{', '.join(groups) or '未配置'}）",
-            f"- 推送平台：{self.config.get('bdw_platform_id', 'aiocqhttp') or 'aiocqhttp'}",
+            f"- 推送平台：{', '.join(self._push_platform_candidates()) or '（未探测到）'}",
             f"- 已记录动态：{len(self._seen)} 条",
             f"- 最近轮询：{last_text}",
         ]
