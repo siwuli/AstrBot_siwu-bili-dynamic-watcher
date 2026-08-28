@@ -2,13 +2,14 @@
 
 监听指定 B 站账号（UP主）的最新动态，新动态自动推送到配置的 QQ 群。
 
-两种拉取模式：
-- follow（推荐）：使用一个已关注目标账号的 B 站账号（SESSDATA 登录态）拉取
-  「关注动态流」接口，再从结果中过滤出监听账号的动态。相比逐个主页轮询，
-  单接口低频请求更不容易触发 B 站风控。
-- space：直接按 UID 轮询用户空间动态接口（免登录，但高频访问易被风控，
-  仅建议少量账号 + 较大轮询间隔时使用）。
+拉取模式：
+- follow（推荐）：用关注号（SESSDATA 登录态）拉取「关注动态流」接口；
+  请求带 WBI 签名（wts/w_rid）并自动补齐 buvid3/buvid4，贴近浏览器行为。
+- space：按 UID 轮询用户空间接口（免登录，易风控，仅少量账号+大间隔）。
+- rss：直接订阅 RSS（RSSHub 哔哩哔哩/微博、RSSWorker 等），官方接口受限时最稳。
+- auto（默认）：优先 follow/space，官方接口触发风控或失败时自动切 RSS 兜底。
 
+所有模式均带随机抖动 + 自适应退避（风控时自动拉长轮询间隔）；
 纯后台轮询 + 主动推送，不依赖 LLM。
 """
 
@@ -25,6 +26,7 @@ from astrbot.api.event import filter
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from . import policy, rss_feed
 from .bili_api import BiliAPIError, BiliDynamicClient
 
 logger = logging.getLogger("astrbot")
@@ -33,7 +35,8 @@ DATA_DIR = os.path.join(get_astrbot_data_path(), "bili_dynamic_watcher")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_dynamics.json")
 WATCH_FILE = os.path.join(DATA_DIR, "watched_uids.json")
 
-DEFAULT_POLL_INTERVAL = 60
+DEFAULT_POLL_INTERVAL = 120
+DEFAULT_BACKOFF_MAX = 3600
 MIN_POLL_INTERVAL = 10
 MAX_SEEN_KEEP = 3000
 MAX_DYNAMIC_TEXT_LEN = 120
@@ -51,6 +54,7 @@ DYNAMIC_TYPE_NAMES = {
     "DYNAMIC_TYPE_PGC": "剧集动态",
     "DYNAMIC_TYPE_MATCH": "赛事动态",
     "DYNAMIC_TYPE_COMMON": "普通动态",
+    "DYNAMIC_TYPE_RSS": "新动态",
 }
 
 
@@ -116,9 +120,13 @@ def format_dynamic(item: dict) -> str:
         else ""
     )
     did = str(item.get("id_str") or "")
-    link = f"https://t.bilibili.com/{did}" if did else ""
+    if dtype == "DYNAMIC_TYPE_RSS":
+        link = str((item.get("_rss") or {}).get("link") or "").strip()
+    else:
+        link = f"https://t.bilibili.com/{did}" if did else ""
 
-    lines = [f"【B站新动态】{name} 发布了{type_name}"]
+    prefix = "【动态】" if dtype == "DYNAMIC_TYPE_RSS" else "【B站新动态】"
+    lines = [f"{prefix}{name} 发布了{type_name}"]
     if text:
         lines.append(text)
     major = dyn.get("major") or {}
@@ -150,6 +158,8 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._seen: set[str] = set()
         self._watching: dict[str, str] = {}  # uid -> 备注
         self._warmup_pending = False
+        self._backoff_level = 0
+        self._last_source = ""
         self._last_poll: dict = {
             "time": 0,
             "new": 0,
@@ -180,8 +190,8 @@ class BiliDynamicWatcherPlugin(star.Star):
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._poll_loop())
             logger.info(
-                "B站动态监听已启动：模式=%s，监听 %d 个账号",
-                str(self.config.get("bdw_mode", "follow") or "follow"),
+                "B站动态监听已启动：模式=%s（auto=follow+RSS兜底），监听 %d 个账号",
+                str(self.config.get("bdw_mode", "auto") or "auto"),
                 len(self._watching),
             )
 
@@ -211,14 +221,31 @@ class BiliDynamicWatcherPlugin(star.Star):
                 self._last_poll["error"] = str(e)[:200]
             await asyncio.sleep(self._current_interval())
 
+    def _rss_base(self) -> str:
+        """RSS 订阅源基础地址（去尾斜杠）。"""
+        return str(self.config.get("bdw_rss_base", "") or "").strip().rstrip("/")
+
+    def _wbi_text(self) -> str:
+        """WBI 签名状态的展示文案。"""
+        if not self._http:
+            return "未初始化"
+        st = self._http.wbi_status()
+        if not st.get("enabled"):
+            return "关闭"
+        if st.get("signed"):
+            return "已启用（签名生效）"
+        return "已启用（密钥待刷新）" + (f"：{st.get('error')}" if st.get("error") else "")
+
     def _current_interval(self) -> float:
-        interval = float(
+        base = int(
             self.config.get("bdw_poll_interval", DEFAULT_POLL_INTERVAL)
             or DEFAULT_POLL_INTERVAL
         )
-        interval = max(MIN_POLL_INTERVAL, interval)
-        # 加一点随机抖动，避免固定节奏被风控
-        return interval + random.uniform(0, max(1.0, interval * 0.2))
+        cap = int(
+            self.config.get("bdw_backoff_max", DEFAULT_BACKOFF_MAX)
+            or DEFAULT_BACKOFF_MAX
+        )
+        return policy.jittered_interval(base, self._backoff_level, cap)
 
     async def _poll_once(self) -> None:
         if not bool(self.config.get("bdw_enabled", True)):
@@ -226,13 +253,28 @@ class BiliDynamicWatcherPlugin(star.Star):
         watched = self._current_watch_list()
         if not watched:
             return
-        mode = str(self.config.get("bdw_mode", "follow") or "follow").strip().lower()
+        mode = str(self.config.get("bdw_mode", "auto") or "auto").strip().lower()
         try:
-            items = await self._fetch_latest_items(mode)
+            items, source = await self._fetch_latest_items(mode)
+            self._backoff_level = policy.reset_backoff_level()
         except BiliAPIError as e:
-            logger.error("拉取B站动态失败: %s", e)
-            self._last_poll["error"] = str(e)[:200]
-            return
+            if mode == "auto" and self._rss_base():
+                logger.warning("官方接口拉取失败（%s），本轮改用 RSS 兜底", e)
+                try:
+                    items, _src = await self._fetch_latest_items("rss")
+                    source = "rss(兜底)"
+                    self._backoff_level = policy.reset_backoff_level()
+                except BiliAPIError as e2:
+                    logger.error("官方接口与 RSS 兜底均失败: %s；%s", e, e2)
+                    self._last_poll["error"] = f"{e}；RSS兜底失败: {e2}"[:200]
+                    self._backoff_level = policy.next_backoff_level(self._backoff_level)
+                    return
+            else:
+                logger.error("拉取B站动态失败: %s", e)
+                self._last_poll["error"] = str(e)[:200]
+                self._backoff_level = policy.next_backoff_level(self._backoff_level)
+                return
+        self._last_source = source
 
         new_items = self._select_new_items(items, watched)
 
@@ -240,7 +282,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         if self._warmup_pending:
             self._warmup_pending = False
             if new_items:
-                self._record_seen([str(it.get("id_str")) for it in new_items])
+                self._record_seen(new_items)
                 self._last_poll.update(
                     time=time_now(),
                     new=len(new_items),
@@ -308,20 +350,57 @@ class BiliDynamicWatcherPlugin(star.Star):
             pushed_fail,
         )
 
-    async def _fetch_latest_items(self, mode: str) -> list[dict]:
-        """按模式拉取最新动态列表（未过滤）。"""
+    async def _fetch_latest_items(self, mode: str) -> tuple[list[dict], str]:
+        """按模式拉取最新动态列表，返回 (items, 实际数据源)。"""
+        mode = str(mode or "auto").strip().lower()
+        watched = self._current_watch_list()
+        if mode in ("follow", "auto"):
+            data = await self._http.fetch_follow_feed()
+            items = (data.get("data") or {}).get("items") or []
+            return items, "follow"
         if mode == "space":
             items: list[dict] = []
-            for uid in self._current_watch_list():
+            for uid in watched:
                 try:
                     data = await self._http.fetch_space_feed(uid)
                     items.extend((data.get("data") or {}).get("items") or [])
                 except BiliAPIError as e:
                     logger.error("拉取空间动态失败 uid=%s: %s", uid, e)
                 await asyncio.sleep(random.uniform(1.0, 3.0))
-            return items
-        data = await self._http.fetch_follow_feed()
-        return (data.get("data") or {}).get("items") or []
+            return items, "space"
+        if mode == "rss":
+            return await self._fetch_rss_items(watched), "rss"
+        raise BiliAPIError(f"未知的拉取模式: {mode}")
+
+    async def _fetch_rss_items(self, watched: dict[str, str]) -> list[dict]:
+        """RSS 模式：逐 UID 拉取订阅源（RSSHub / RSSWorker 等）。"""
+        base = self._rss_base()
+        route = str(
+            self.config.get("bdw_rss_route", "bilibili/user/dynamic/{uid}")
+            or "bilibili/user/dynamic/{uid}"
+        ).strip().lstrip("/")
+        if not base:
+            raise BiliAPIError("未配置 bdw_rss_base（RSS 订阅源地址）")
+        if "{uid}" not in route:
+            raise BiliAPIError(
+                "bdw_rss_route 必须包含 {uid} 占位符，如 bilibili/user/dynamic/{uid}"
+            )
+        items: list[dict] = []
+        errors: list[str] = []
+        for uid in watched:
+            url = f"{base}/{route.format(uid=uid)}"
+            try:
+                xml_text = await self._http.fetch_text(url)
+                entries = rss_feed.parse_feed(xml_text)
+                items.extend(rss_feed.pseudo_item(e, uid) for e in entries)
+                logger.info("RSS 源 uid=%s 拉取 %d 条条目", uid, len(entries))
+            except BiliAPIError as e:
+                errors.append(f"uid={uid}: {e}")
+                logger.error("RSS 源 uid=%s 拉取失败: %s", uid, e)
+            await asyncio.sleep(random.uniform(0.5, 2.0))
+        if not items and errors:
+            raise BiliAPIError("RSS 拉取全部失败：" + "；".join(errors[:2]))
+        return items
 
     def _items_of_watched(
         self, items: list[dict], watched: dict[str, str]
@@ -339,6 +418,13 @@ class BiliDynamicWatcherPlugin(star.Star):
                 out.append(item)
         return out
 
+    def _seen_key(self, item: dict) -> str:
+        """动态去重键：api:<官方向 id_str> 或 rss:<guid 哈希>。"""
+        raw = str(item.get("id_str") or "").strip()
+        if str(item.get("kind") or "") == "rss":
+            return f"rss:{raw}"
+        return f"api:{raw}"
+
     def _select_new_items(
         self, items: list[dict], watched: dict[str, str]
     ) -> list[dict]:
@@ -346,7 +432,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         return [
             it
             for it in self._items_of_watched(items, watched)
-            if str(it.get("id_str") or "").strip() not in self._seen
+            if self._seen_key(it) not in self._seen
         ]
 
     # ------------------------------------------------------------------
@@ -518,12 +604,24 @@ class BiliDynamicWatcherPlugin(star.Star):
                 + (f"（错误：{last['error']}）" if last.get("error") else "")
             )
         )
+        base_iv = int(
+            self.config.get("bdw_poll_interval", DEFAULT_POLL_INTERVAL)
+            or DEFAULT_POLL_INTERVAL
+        )
+        cap_iv = int(
+            self.config.get("bdw_backoff_max", DEFAULT_BACKOFF_MAX)
+            or DEFAULT_BACKOFF_MAX
+        )
         lines = [
             "B站动态监听状态：",
             f"- 总开关：{'开启' if bool(self.config.get('bdw_enabled', True)) else '关闭'}",
-            f"- 模式：{self.config.get('bdw_mode', 'follow') or 'follow'}",
+            f"- 模式：{self.config.get('bdw_mode', 'auto') or 'auto'}（auto=follow+RSS兜底）",
+            f"- 数据源：{self._last_source or '（尚未轮询）'}",
             f"- SESSDATA：{sess_masked}",
-            f"- 轮询间隔：{self.config.get('bdw_poll_interval', 60)} 秒",
+            f"- 轮询间隔：基础 {base_iv} 秒，退避级别 {self._backoff_level}，"
+            f"当前实际 {int(policy.effective_interval(base_iv, self._backoff_level, cap_iv))} 秒",
+            f"- WBI 签名：{self._wbi_text()}",
+            f"- RSS 兜底：{self._rss_base() or '未配置（auto 模式不会切 RSS）'}",
             f"- 监听账号：{len(watched)} 个",
             f"- 推送群：{len(groups)} 个（{', '.join(groups) or '未配置'}）",
             f"- 推送平台：{', '.join(self._push_platform_candidates()) or '（未探测到）'}",
@@ -546,12 +644,12 @@ class BiliDynamicWatcherPlugin(star.Star):
             event.stop_event()
             yield event.make_result().message("请先添加监听账号（bd添加 <UID>）。")
             return
-        mode = str(self.config.get("bdw_mode", "follow") or "follow").strip().lower()
+        mode = str(self.config.get("bdw_mode", "auto") or "auto").strip().lower()
         try:
-            items = await self._fetch_latest_items(mode)
+            items, source = await self._fetch_latest_items(mode)
         except BiliAPIError as e:
             event.stop_event()
-            yield event.make_result().message(f"拉取失败：{e}")
+            yield event.make_result().message(f"拉取失败（{mode}）：{e}")
             return
         matched_all = self._items_of_watched(items, watched)
         matched = self._select_new_items(items, watched)
@@ -559,7 +657,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         if not matched:
             if matched_all:
                 yield event.make_result().message(
-                    f"拉取成功（模式 {mode}），接口返回 {len(items)} 条动态，"
+                    f"拉取成功（数据源 {source}），接口返回 {len(items)} 条动态，"
                     f"其中 {len(matched_all)} 条属于监听账号，但都已在「已记录动态」中"
                     "（此前轮询已处理/推送），属正常。等目标账号发布新动态即可看到推送。"
                 )
@@ -572,7 +670,7 @@ class BiliDynamicWatcherPlugin(star.Star):
                     " / UID 是否填写正确。"
                 )
             return
-        lines = [f"拉取成功（模式 {mode}），发现 {len(matched)} 条未推送新动态："]
+        lines = [f"拉取成功（数据源 {source}），发现 {len(matched)} 条未推送新动态："]
         for item in matched[:10]:
             modules = item.get("modules") or {}
             author = modules.get("module_author") or {}
@@ -642,14 +740,24 @@ class BiliDynamicWatcherPlugin(star.Star):
             if os.path.exists(SEEN_FILE):
                 with open(SEEN_FILE, encoding="utf-8") as f:
                     data = json.load(f)
-                self._seen = {str(x) for x in (data or [])}
+                migrated: set[str] = set()
+                for x in data or []:
+                    s = str(x).strip()
+                    if not s:
+                        continue
+                    migrated.add(s)
+                    # v2.0 起去重键带 api:/rss: 前缀；迁移旧数据避免升级后重复推送
+                    if not s.startswith("api:") and not s.startswith("rss:"):
+                        migrated.add("api:" + s)
+                self._seen = migrated
         except Exception as e:  # noqa: BLE001
             logger.error("读取已见动态列表失败: %s", e)
 
-    def _record_seen(self, ids: list[str]) -> None:
-        for i in ids:
-            if i:
-                self._seen.add(i)
+    def _record_seen(self, items: list[dict]) -> None:
+        for it in items or []:
+            key = self._seen_key(it)
+            if key:
+                self._seen.add(key)
         if len(self._seen) > MAX_SEEN_KEEP:
             self._seen = set(list(self._seen)[-MAX_SEEN_KEEP:])
         os.makedirs(DATA_DIR, exist_ok=True)
