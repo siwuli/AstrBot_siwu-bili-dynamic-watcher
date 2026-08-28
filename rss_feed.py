@@ -19,6 +19,17 @@ from xml.etree import ElementTree as ET
 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 _XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>", re.I)
+_IMG_RE = re.compile(r"<img\s+[^>]*?src=[\"'][^\"']+[\"']", re.I)
+
+
+def extract_html_images(html):
+    """从 HTML 片段中提取 <img src> 列表。"""
+    out = []
+    for m in _IMG_RE.findall(html or ""):
+        src = m.split('src=', 1)[-1].strip().strip('"').strip("'")
+        if src and src not in out:
+            out.append(src)
+    return out
 
 
 def rss_seen_key(guid):
@@ -117,13 +128,17 @@ def _parse_entry(entry, root):
             author = _find(au, ATOM_NS + "name")
         pub = _find(entry, ATOM_NS + "published", ATOM_NS + "updated")
         pub_ts = _parse_date(pub) if pub else 0
-    else:
+    enclosure = ""
+    if not is_atom:
         title = _find(entry, "title")
         link = _find(entry, "link")
         guid = _find(entry, "guid") or link
         desc = _find(entry, "description")
         author = _find(entry, "author", "{http://purl.org/dc/elements/1.1/}creator")
         pub_ts = _parse_date(_find(entry, "pubDate", "dc:date"))
+        enc = entry.find("enclosure")
+        if enc is not None:
+            enclosure = str(enc.get("url") or "").strip()
     return {
         "guid": guid or link or title,
         "link": link,
@@ -131,6 +146,8 @@ def _parse_entry(entry, root):
         "description": desc,
         "author": author,
         "pub_ts": pub_ts,
+        "enclosure": enclosure,
+        "images": extract_html_images(desc),
     }
 
 
@@ -158,5 +175,18 @@ def pseudo_item(entry, uid):
         "_rss": {
             "link": str(entry.get("link") or ""),
             "title": str(entry.get("title") or ""),
+            "images": _rss_images(entry),
         },
     }
+
+
+def _rss_images(entry):
+    """条目的图片列表：enclosure 优先，其次 description 中的 <img>。"""
+    imgs = []
+    enc = str(entry.get("enclosure") or "").strip()
+    if enc:
+        imgs.append(enc)
+    for u in (entry.get("images") or []):
+        if u not in imgs:
+            imgs.append(u)
+    return imgs[:9]

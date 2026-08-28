@@ -28,6 +28,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from . import policy, rss_feed
 from .bili_api import BiliAPIError, BiliDynamicClient
+from .rules import DEFAULT_IGNORE_KEYWORDS, item_images, should_push
 
 logger = logging.getLogger("astrbot")
 
@@ -165,6 +166,7 @@ class BiliDynamicWatcherPlugin(star.Star):
             "new": 0,
             "pushed_ok": 0,
             "pushed_fail": 0,
+            "skipped": 0,
             "error": "",
         }
 
@@ -305,20 +307,56 @@ class BiliDynamicWatcherPlugin(star.Star):
                     "之后只推送新发布的动态",
                     len(new_items),
                 )
-            else:
                 self._last_poll.update(
-                    time=time_now(), new=0, pushed_ok=0, pushed_fail=0, error=""
+                    time=time_now(),
+                    new=0,
+                    pushed_ok=0,
+                    pushed_fail=0,
+                    skipped=0,
+                    error="",
                 )
             return
 
         if not new_items:
             self._last_poll.update(
-                time=time_now(), new=0, pushed_ok=0, pushed_fail=0, error=""
+                time=time_now(),
+                new=0,
+                pushed_ok=0,
+                pushed_fail=0,
+                skipped=0,
+                error="",
             )
             return
 
-        # 按发布时间倒序，取最新的 N 条推送
-        new_items.sort(
+        # 推送规则：转发 / 抽奖类默认忽略（仍记录已见，避免反复出现）
+        pushable = []
+        skipped = 0
+        for it in new_items:
+            ok, _reason = should_push(it, self.config)
+            if ok:
+                pushable.append(it)
+            else:
+                skipped += 1
+
+        if not pushable:
+            self._record_seen(new_items)
+            self._last_poll.update(
+                time=time_now(),
+                new=len(new_items),
+                pushed_ok=0,
+                pushed_fail=0,
+                skipped=skipped,
+                error="",
+            )
+            logger.info(
+                "B站动态轮询：发现 %d 条新动态，全部按规则忽略 %d 条（转发/抽奖），不推送",
+                len(new_items),
+                skipped,
+            )
+            return
+
+        # 按发布时间倒序，取最新的 N 条可推送动态
+        pushable.sort(
             key=lambda it: int(
                 (it.get("modules") or {}).get("module_author", {}).get("pub_ts") or 0
             ),
@@ -331,12 +369,14 @@ class BiliDynamicWatcherPlugin(star.Star):
                 or MAX_PUSH_PER_CYCLE
             ),
         )
-        to_push = new_items[:limit]
+        to_push = pushable[:limit]
         pushed_ok = 0
         pushed_fail = 0
         for item in to_push:
             try:
-                if await self._push_to_groups(format_dynamic(item)):
+                if await self._push_to_groups(
+                    format_dynamic(item), item_images(item)
+                ):
                     pushed_ok += 1
                 else:
                     pushed_fail += 1
@@ -344,20 +384,22 @@ class BiliDynamicWatcherPlugin(star.Star):
                 pushed_fail += 1
                 logger.error("推送B站动态失败: %s", e)
 
-        # 本轮所有新动态都记为已见（包括超出推送上限的），避免下轮重复
+        # 本轮所有新动态都记为已见（包括被忽略与超出上限的），避免下轮重复
         self._record_seen(new_items)
         self._last_poll.update(
             time=time_now(),
             new=len(new_items),
             pushed_ok=pushed_ok,
             pushed_fail=pushed_fail,
+            skipped=skipped,
             error="",
         )
         logger.info(
-            "B站动态轮询：发现 %d 条新动态，推送成功 %d 条，失败 %d 条",
+            "B站动态轮询：发现 %d 条新动态，推送成功 %d 条，失败 %d 条，按规则忽略 %d 条",
             len(new_items),
             pushed_ok,
             pushed_fail,
+            skipped,
         )
 
     async def _fetch_latest_items(self, mode: str) -> tuple[list[dict], str]:
@@ -448,14 +490,20 @@ class BiliDynamicWatcherPlugin(star.Star):
     # ------------------------------------------------------------------
     # 推送
     # ------------------------------------------------------------------
-    async def _push_to_groups(self, text: str) -> bool:
-        """推送动态到所有目标群。返回是否有至少一个群发送成功。"""
+    async def _push_to_groups(self, text: str, images: list | None = None) -> bool:
+        """推送动态（可附带图片）到所有目标群。返回是否有至少一个群发送成功。"""
         groups = _norm_list(self.config.get("bdw_groups"))
         if not groups:
             logger.warning("未配置推送目标群（bdw_groups），动态未发送：%s", text[:60])
             return False
         candidates = self._push_platform_candidates()
         chain = MessageChain().message(text)
+        if bool(self.config.get("bdw_push_images", True)):
+            for url in images or []:
+                try:
+                    chain.url_image(url)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("附加图片失败 %s: %s", url, e)
         sent = 0
         for gid in groups:
             if not gid.isdigit():
@@ -635,6 +683,10 @@ class BiliDynamicWatcherPlugin(star.Star):
             f"- 监听账号：{len(watched)} 个",
             f"- 推送群：{len(groups)} 个（{', '.join(groups) or '未配置'}）",
             f"- 推送平台：{', '.join(self._push_platform_candidates()) or '（未探测到）'}",
+            f"- 推送规则：图片{'开' if bool(self.config.get('bdw_push_images', True)) else '关'}；"
+            f"转发{'忽略' if bool(self.config.get('bdw_ignore_forward', True)) else '推送'}；"
+            f"抽奖{'过滤' if bool(self.config.get('bdw_ignore_lottery', True)) else '不过滤'}"
+            f"（{len(_norm_list(self.config.get('bdw_ignore_keywords', DEFAULT_IGNORE_KEYWORDS)))} 个关键词）",
             f"- 已记录动态：{len(self._seen)} 条",
             f"- 最近轮询：{last_text}",
         ]
@@ -663,6 +715,8 @@ class BiliDynamicWatcherPlugin(star.Star):
             return
         matched_all = self._items_of_watched(items, watched)
         matched = self._select_new_items(items, watched)
+        pushable = [it for it in matched if should_push(it, self.config)[0]]
+        skipped = len(matched) - len(pushable)
         event.stop_event()
         if not matched:
             if matched_all:
@@ -673,15 +727,18 @@ class BiliDynamicWatcherPlugin(star.Star):
                 )
             else:
                 yield event.make_result().message(
-                    f"拉取成功（模式 {mode}），接口返回 {len(items)} 条动态，"
+                    f"拉取成功（数据源 {source}），接口返回 {len(items)} 条动态，"
                     "其中没有属于监听账号的动态。\n"
                     "请检查：关注号是否已关注目标账号 / SESSDATA 是否有效"
                     "（浏览器访问 https://api.bilibili.com/x/web-interface/nav 看 code 是否为 0）"
                     " / UID 是否填写正确。"
                 )
             return
-        lines = [f"拉取成功（数据源 {source}），发现 {len(matched)} 条未推送新动态："]
-        for item in matched[:10]:
+        head = f"拉取成功（数据源 {source}），发现 {len(matched)} 条未推送新动态"
+        if skipped:
+            head += f"，其中 {skipped} 条按规则忽略（转发/抽奖）"
+        lines = [head + "："]
+        for item in pushable[:10]:
             modules = item.get("modules") or {}
             author = modules.get("module_author") or {}
             dtype = str(item.get("type") or "")
