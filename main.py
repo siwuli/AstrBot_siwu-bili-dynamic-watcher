@@ -385,8 +385,14 @@ class BiliDynamicWatcherPlugin(star.Star):
     def _push_platform_candidates(self) -> list[str]:
         """推送时尝试的平台 ID 列表：优先配置值，其次自动探测到的平台 ID。"""
         configured = str(self.config.get("bdw_platform_id", "") or "").strip()
+        # 平台适配器可能晚于插件初始化，这里在推送时惰性重探测，避免加载时探测为空
+        detected = self._platform_ids
+        if not detected:
+            detected = self._detect_platform_ids()
+            if detected:
+                self._platform_ids = detected
         candidates: list[str] = []
-        for pid in ([configured] if configured else []) + self._platform_ids:
+        for pid in ([configured] if configured else []) + detected:
             if pid and pid not in candidates:
                 candidates.append(pid)
         if not candidates:
@@ -398,6 +404,14 @@ class BiliDynamicWatcherPlugin(star.Star):
         ids: list[str] = []
         pm = getattr(self.context, "platform_manager", None)
         insts = getattr(pm, "platform_insts", None) if pm else None
+        if not insts and pm is not None:
+            # 兼容部分版本：优先用 get_insts() 获取平台实例列表
+            getter = getattr(pm, "get_insts", None)
+            if callable(getter):
+                try:
+                    insts = getter()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("获取平台实例列表失败: %s", e)
         for p in insts or []:
             try:
                 meta = p.meta()
