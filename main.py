@@ -217,7 +217,7 @@ class BiliDynamicWatcherPlugin(star.Star):
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                logger.error("B站动态轮询异常: %s", e)
+                logger.error("B站动态轮询异常: %s", e, exc_info=True)
                 self._last_poll["error"] = str(e)[:200]
             await asyncio.sleep(self._current_interval())
 
@@ -345,7 +345,7 @@ class BiliDynamicWatcherPlugin(star.Star):
                 logger.error("推送B站动态失败: %s", e)
 
         # 本轮所有新动态都记为已见（包括超出推送上限的），避免下轮重复
-        self._record_seen([str(it.get("id_str")) for it in new_items])
+        self._record_seen(new_items)
         self._last_poll.update(
             time=time_now(),
             new=len(new_items),
@@ -763,8 +763,13 @@ class BiliDynamicWatcherPlugin(star.Star):
         except Exception as e:  # noqa: BLE001
             logger.error("读取已见动态列表失败: %s", e)
 
-    def _record_seen(self, items: list[dict]) -> None:
+    def _record_seen(self, items) -> None:
         for it in items or []:
+            if isinstance(it, str):
+                # 兼容旧存储的字符串键（防御）
+                if it.strip():
+                    self._seen.add(it.strip())
+                continue
             key = self._seen_key(it)
             if key:
                 self._seen.add(key)
