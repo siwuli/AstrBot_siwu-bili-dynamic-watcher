@@ -71,6 +71,30 @@
     "type": "string",
     "default": "bilibili/user/dynamic/{uid}"
   },
+  "bdw_push_images": {
+    "description": "推送时附带动态图片",
+    "hint": "开启后图文动态/视频封面/转发原图会随推送一起发送（最多 9 张）",
+    "type": "bool",
+    "default": true
+  },
+  "bdw_ignore_forward": {
+    "description": "忽略转发动态",
+    "hint": "开启（默认）后【转发】类型的动态不推送（仍会记录已见，不会反复出现）",
+    "type": "bool",
+    "default": true
+  },
+  "bdw_ignore_lottery": {
+    "description": "忽略抽奖/中奖类动态",
+    "hint": "开启（默认）后正文或转发原动态命中下方关键词就不推送",
+    "type": "bool",
+    "default": true
+  },
+  "bdw_ignore_keywords": {
+    "description": "抽奖类忽略关键词",
+    "hint": "每行一个关键词，命中即忽略；默认：抽奖 / 中奖 / 开奖 / 锦鲤 / 转发抽奖",
+    "type": "list",
+    "default": ["抽奖", "中奖", "开奖", "锦鲤", "转发抽奖"]
+  },
   "bdw_max_per_cycle": {
     "description": "每轮最多推送条数",
     "hint": "单次轮询发现的新动态超过该值时只推送最新的 N 条，防止刷屏（其余会被记为已见）",
