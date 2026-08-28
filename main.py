@@ -269,11 +269,21 @@ class BiliDynamicWatcherPlugin(star.Star):
                     self._last_poll["error"] = f"{e}；RSS兜底失败: {e2}"[:200]
                     self._backoff_level = policy.next_backoff_level(self._backoff_level)
                     return
+                except Exception as e2:  # noqa: BLE001
+                    logger.error("官方接口与 RSS 兜底均失败（未知异常）: %s；%s", e, e2)
+                    self._last_poll["error"] = f"{e}；RSS兜底异常: {e2}"[:200]
+                    self._backoff_level = policy.next_backoff_level(self._backoff_level)
+                    return
             else:
                 logger.error("拉取B站动态失败: %s", e)
                 self._last_poll["error"] = str(e)[:200]
                 self._backoff_level = policy.next_backoff_level(self._backoff_level)
                 return
+        except Exception as e:  # noqa: BLE001
+            logger.error("拉取B站动态未知异常: %s", e)
+            self._last_poll["error"] = str(e)[:200]
+            self._backoff_level = policy.next_backoff_level(self._backoff_level)
+            return
         self._last_source = source
 
         new_items = self._select_new_items(items, watched)

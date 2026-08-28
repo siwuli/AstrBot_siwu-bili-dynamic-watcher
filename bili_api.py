@@ -12,6 +12,7 @@
 所有接口错误统一抛 BiliAPIError，由插件层处理。
 """
 
+import asyncio
 import logging
 import time
 
@@ -208,7 +209,7 @@ class BiliDynamicClient:
                         f"RSS 源 HTTP {resp.status}", http_status=resp.status
                     )
                 return await resp.text()
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             raise BiliAPIError(f"请求 RSS 源失败：{e}") from e
 
     # ------------------------------------------------------------------
@@ -251,7 +252,7 @@ class BiliDynamicClient:
                             f"B站接口 HTTP {resp.status}", http_status=resp.status
                         )
                     data = await resp.json(content_type=None)
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 raise BiliAPIError(f"请求 B站接口失败：{e}") from e
 
             code = data.get("code")
