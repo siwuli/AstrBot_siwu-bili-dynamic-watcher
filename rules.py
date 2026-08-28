@@ -48,6 +48,9 @@ def item_images(item, limit=MAX_IMAGES):
 
     def add(url):
         url = str(url or "").strip()
+        # 统一为 https（图床 URL 常为 http，QQ/OneBot 对 https 更友好）
+        if url.startswith("http://"):
+            url = "https://" + url[len("http://") :]
         if url and url not in imgs:
             imgs.append(url)
 
@@ -68,7 +71,7 @@ def item_images(item, limit=MAX_IMAGES):
                 add(it.get("src"))
         arch = major.get("archive") or {}
         if isinstance(arch, dict):
-            add(arch.get("pic"))
+            add(arch.get("pic") or arch.get("cover"))
         orig = node.get("orig")
         if isinstance(orig, dict):
             walk(orig, depth + 1)
