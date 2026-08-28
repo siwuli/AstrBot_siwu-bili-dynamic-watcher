@@ -89,12 +89,6 @@ def _extract_dynamic_text(dyn: dict, dtype: str) -> str:
         title = str(major["article"].get("title") or "").strip()
         if title:
             desc = f"专栏《{title}》" if not desc else desc
-    elif dtype == "DYNAMIC_TYPE_DRAW":
-        draw = major.get("draw") or {}
-        count = len(draw.get("items") or [])
-        if count:
-            suffix = f"（共 {count} 张图）"
-            desc = f"{desc}{suffix}" if desc else suffix
     elif dtype == "DYNAMIC_TYPE_FORWARD":
         if desc:
             desc = f"转发：{desc}"
@@ -105,8 +99,12 @@ def _extract_dynamic_text(dyn: dict, dtype: str) -> str:
     return _truncate(desc)
 
 
-def format_dynamic(item: dict) -> str:
-    """把一条 B 站动态（polymer web-dynamic v1 的 item）格式化为推送文本。"""
+def format_dynamic_parts(item: dict) -> dict:
+    """把一条动态拆成推送分段：header（标题行）/ body（正文）/ footer（时间链接）。
+
+    图片由 rules.item_images 另行提取，推送时插入 body 与 footer 之间，
+    而不是统一堆在消息末尾。
+    """
     modules = item.get("modules") or {}
     author = modules.get("module_author") or {}
     dyn = modules.get("module_dynamic") or {}
@@ -127,23 +125,38 @@ def format_dynamic(item: dict) -> str:
         link = f"https://t.bilibili.com/{did}" if did else ""
 
     prefix = "【动态】" if dtype == "DYNAMIC_TYPE_RSS" else "【B站新动态】"
-    lines = [f"{prefix}{name} 发布了{type_name}"]
-    if text:
-        lines.append(text)
+    header = f"{prefix}{name} 发布了{type_name}"
+    body = text
+    footer_lines: list[str] = []
     major = dyn.get("major") or {}
     if dtype == "DYNAMIC_TYPE_AV" and major.get("archive"):
         bvid = str(major["archive"].get("bvid") or "").strip()
         if bvid:
-            lines.append(f"视频链接：https://www.bilibili.com/video/{bvid}")
+            footer_lines.append(f"视频链接：https://www.bilibili.com/video/{bvid}")
     elif dtype == "DYNAMIC_TYPE_ARTICLE" and major.get("article"):
         cvid = major["article"].get("id")
         if cvid:
-            lines.append(f"专栏链接：https://www.bilibili.com/read/cv{cvid}")
+            footer_lines.append(f"专栏链接：https://www.bilibili.com/read/cv{cvid}")
     if time_str:
-        lines.append(f"时间：{time_str}")
+        footer_lines.append(f"时间：{time_str}")
     if link:
-        lines.append(f"链接：{link}")
-    return "\n".join(lines)
+        footer_lines.append(f"链接：{link}")
+    return {
+        "header": header,
+        "body": body,
+        "footer": "\n".join(footer_lines),
+    }
+
+
+def format_dynamic(item: dict) -> str:
+    """把一条动态格式化为纯文本（兼容旧用途/调试）。"""
+    parts = format_dynamic_parts(item)
+    segs = [parts["header"]]
+    if parts["body"]:
+        segs.append(parts["body"])
+    if parts["footer"]:
+        segs.append(parts["footer"])
+    return "\n".join(segs)
 
 
 class BiliDynamicWatcherPlugin(star.Star):
@@ -375,7 +388,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         for item in to_push:
             try:
                 if await self._push_to_groups(
-                    format_dynamic(item), item_images(item)
+                    format_dynamic_parts(item), item_images(item)
                 ):
                     pushed_ok += 1
                 else:
@@ -490,20 +503,25 @@ class BiliDynamicWatcherPlugin(star.Star):
     # ------------------------------------------------------------------
     # 推送
     # ------------------------------------------------------------------
-    async def _push_to_groups(self, text: str, images: list | None = None) -> bool:
-        """推送动态（可附带图片）到所有目标群。返回是否有至少一个群发送成功。"""
+    async def _push_to_groups(self, parts: dict, images: list | None = None) -> bool:
+        """推送动态（分段文本 + 可附带图片）到所有目标群。返回是否有至少一个群发送成功。"""
         groups = _norm_list(self.config.get("bdw_groups"))
         if not groups:
             logger.warning("未配置推送目标群（bdw_groups），动态未发送：%s", text[:60])
             return False
         candidates = self._push_platform_candidates()
-        chain = MessageChain().message(text)
+        # 顺序：标题行 → 正文 → 图片 → 时间/链接
+        chain = MessageChain().message(parts.get("header") or "")
+        if parts.get("body"):
+            chain.message(parts["body"])
         if bool(self.config.get("bdw_push_images", True)):
             for url in images or []:
                 try:
                     chain.url_image(url)
                 except Exception as e:  # noqa: BLE001
                     logger.debug("附加图片失败 %s: %s", url, e)
+        if parts.get("footer"):
+            chain.message(parts["footer"])
         sent = 0
         for gid in groups:
             if not gid.isdigit():
