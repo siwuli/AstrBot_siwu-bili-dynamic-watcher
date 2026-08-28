@@ -1,85 +1,106 @@
-# 兔兔 - AstrBot B站动态监听插件
+# 兔兔 - AstrBot 动态监听插件（B站 / 微博 / 任意 RSS）
 
-监听指定 B 站账号（UP主）的最新动态，**新动态自动推送到配置的 QQ 群**。纯后台轮询 + 主动推送，**不依赖 LLM**，对话不会被打扰。
+监听指定账号（B 站 UP 主、微博博主等）的最新动态，**新动态自动推送到配置的 QQ 群**。
+纯后台轮询 + 主动推送，**不依赖 LLM**，对话不会被打扰。
 
-> 插件 id：`bili_dynamic_watcher`　当前版本：`1.0.3`
+> 插件 id：`bili_dynamic_watcher`　当前版本：`2.0.0`
+
+## 为什么会有 v2.0（强壮化）
+
+之前直接轮询 B 站官方接口的插件，**1~2 天就被风控**（HTTP 412 / code=-352）。原因是：
+
+1. 请求没有 **WBI 签名**（wts + w_rid），缺少浏览器指纹 Cookie（buvid3/buvid4），
+   接口很容易判定为脚本请求；
+2. 固定频率轮询，无抖动、无退避，被风控后仍按原频率硬闯。
+
+v2.0 的应对（三层）：
+
+| 层 | 手段 |
+| --- | --- |
+| 请求层 | 自动 WBI 签名（密钥从 nav 接口轮换缓存 24h）+ 自动获取 buvid3/buvid4 指纹；未登录也能取密钥 |
+| 频率层 | 随机抖动（±20%）+ **自适应退避**：触发风控/连续失败时间隔自动 ×2，最长 1 小时（可配），恢复后自动归零 |
+| 兜底层 | **RSS 订阅源**（RSSHub / RSSWorker / 自建）：官方接口被风控时自动切换（auto 模式），或直接指定 rss 模式；**微博等平台同样可盯** |
 
 ## 工作原理
 
-### 推荐：关注流模式（follow）
+### 拉取模式（bdw_mode）
 
-针对「频繁访问主页会被风控」的问题，本插件默认使用**关注流模式**：
+| 模式 | 说明 | 适用 |
+| --- | --- | --- |
+| `auto`（默认） | 优先 follow（有 SESSDATA 时），官方接口风控/失败自动切 RSS 兜底 | 一般用户 |
+| `follow` | 只用关注流官方接口（WBI 签名） | 不想依赖 RSS |
+| `space` | 按 UID 轮询用户空间接口（免登录） | 少量账号 + 大间隔 |
+| `rss` | 只走 RSS 订阅源，完全绕开官方接口风控 | 追求绝对稳定 |
 
-1. 用一个**关注号**（普通 B 站账号即可）在 B 站关注所有要监听的 UP 主；
-2. 插件用该账号的登录态（`SESSDATA` Cookie）低频拉取「关注动态流」接口；
-3. 从返回结果中过滤出监听账号的动态，发现新的就推送到 QQ 群。
+### 官方接口模式（follow / space）
 
-相比逐个轮询用户主页，**单接口低频请求**（默认 60 秒一次）更接近正常用户行为，大幅降低被风控（412）的概率。
+- 关注流：用关注号（SESSDATA 登录态）低频拉取「关注动态流」接口，过滤出监听账号的动态；
+- 空间流：按 UID 轮询用户空间接口；
+- 两种模式都带 WBI 签名 + buvid 指纹 + 抖动 + 退避。
 
-### 备选：空间轮询模式（space）
+### RSS 模式（rss / auto 兜底）
 
-免登录，直接按 UID 轮询用户空间动态接口。**不推荐大量账号使用**——高频访问主页接口容易被 B 站风控。仅适合少量账号 + 较大轮询间隔（≥120 秒）。
+- 每个监听 UID 对应一个订阅源：`{bdw_rss_base}/{bdw_rss_route}`；
+- 默认路由 `bilibili/user/dynamic/{uid}`（RSSHub 哔哩哔哩动态）；
+- 微博：把 `bdw_rss_route` 改为 `weibo/user/{uid}`（文本/图片动态，公共实例常需 cookie，建议自建 RSSHub 配 `WEIBO_COOKIES`）；
+- 也兼容 RSSWorker（Cloudflare Worker）等标准 RSS 输出；
+- RSS 条目用 guid/link 哈希去重（`rss:` 前缀），与官方接口的 `api:` 前缀互不冲突。
 
 ## 前置准备
 
-1. **获取关注号的 SESSDATA（Cookie）**
-   - 用浏览器登录 `bilibili.com`（建议用小号，不要用主号）
-   - 按 `F12` → `Application` → `Cookies` → `https://www.bilibili.com`
-   - 复制 `SESSDATA` 的值，填到插件配置 `bdw_sessdata`
-   - `SESSDATA` 有效期约半年，失效后需重新获取（收到 code=-101 提示时即过期）
-   - 注意：Cookie 列表里可能出现两条 `SESSDATA`（`.bilibili.com` 和 `.biligame.com` 域各一条），**请选择 Domain 为 `.bilibili.com` 的那条**（动态接口属于 bilibili.com 域；`.biligame.com` 那条是 B 站游戏站的，填了无效）
-2. **（可选）获取 `buvid3`**：同样位置复制，填到 `bdw_buvid3`，可辅助降低风控概率
-3. **关注目标账号**：用关注号在 B 站关注所有要监听的 UP 主
-4. **获取目标 UID**：UP 主个人空间地址 `https://space.bilibili.com/<UID>` 中的数字
-5. **填 QQ 群号**：插件配置 `bdw_groups` 中填入要推送的群号（每行一个）
-
-## 安装
-
-1. 打包（见下文）或直接使用仓库 `dist/` 下的 zip
-2. AstrBot 管理面板 → 插件管理 → 安装插件 → 上传 zip
-3. 在插件配置中填写：`bdw_sessdata`、`bdw_groups`、`bdw_uid_list`（或安装后用指令添加）
-4. 插件加载后自动开始轮询；修改配置后建议在插件管理中点「重载插件」确保生效
+1. **（follow 需要）获取关注号的 SESSDATA（Cookie）**
+   - 用浏览器登录 `bilibili.com`（建议用小号）
+   - F12 → Application → Cookies → `https://www.bilibili.com` → 复制 `SESSDATA`
+   - **请选择 Domain 为 `.bilibili.com` 的那条**（.biligame.com 那条无效）
+   - 有效期约半年，失效报 code=-101
+2. **（可选）buvid3**：同位置复制；不填则自动通过 spi 接口获取
+3. **关注目标账号**：follow 模式要求关注号在 B 站关注目标 UP 主
+4. **UID**：B 站个人空间地址 `https://space.bilibili.com/<UID>` 中的数字；微博为博主主页的纯数字 uid
+5. **QQ 群号**：配置 `bdw_groups`
 
 ## 配置项
 
 | 配置项 | 说明 | 默认 |
 | --- | --- | --- |
-| `bdw_enabled` | 插件总开关 | `true` |
-| `bdw_mode` | 拉取模式：`follow` 关注流（推荐）/ `space` 空间轮询 | `follow` |
-| `bdw_sessdata` | 关注号登录 Cookie（SESSDATA），follow 模式必填 | 空 |
-| `bdw_buvid3` | 浏览器 Cookie buvid3（可选，辅助防风控） | 空 |
-| `bdw_uid_list` | 初始监听 UID 列表（每行一个；仅首次加载时写入） | `[]` |
-| `bdw_warmup` | 首次启动预热：只记录历史动态不推送，之后只推新动态 | `true` |
+| `bdw_enabled` | 总开关 | `true` |
+| `bdw_mode` | `auto`（默认）/ `follow` / `space` / `rss` | `auto` |
+| `bdw_sessdata` | 关注号 SESSDATA（follow 需要） | 空 |
+| `bdw_buvid3` | 浏览器 buvid3（可选，自动获取兜底） | 空 |
+| `bdw_uid_list` | 初始监听 UID 列表（仅首次加载写入） | `[]` |
+| `bdw_warmup` | 首次启动预热：历史动态只记录不推送 | `true` |
 | `bdw_groups` | 推送目标 QQ 群号（每行一个） | `[]` |
-| `bdw_platform_id` | 推送平台适配器 ID（**留空自动探测**，推荐；多平台时填指定 ID） | 空（自动） |
-| `bdw_poll_interval` | 轮询间隔（秒），follow 默认 60，space 建议 ≥120 | `60` |
-| `bdw_max_per_cycle` | 每轮最多推送条数（防刷屏） | `10` |
-| `bdw_timeout` | 接口请求超时（秒） | `15` |
-| `bdw_proxy` | HTTP 代理（如 `http://127.0.0.1:7890`），留空直连 | 空 |
-| `bdw_permission_enabled` | 管理指令权限校验开关 | `true` |
-| `bdw_admin_ids` | 可执行管理指令的用户 ID 白名单（每行一个） | `[]` |
-| `bdw_admin_role` | 群内可执行管理指令的角色 | `["owner", "admin"]` |
+| `bdw_platform_id` | 推送平台适配器 ID（**留空自动探测**） | 空 |
+| `bdw_poll_interval` | 基础轮询间隔（秒） | `120` |
+| `bdw_backoff_max` | 风控退避上限（秒），触发后间隔 ×2 直到该值 | `3600` |
+| `bdw_rss_base` | RSS 源地址（如 `https://rsshub.app` 或自建）| 空 |
+| `bdw_rss_route` | RSS 路由模板（须含 `{uid}` 占位符） | `bilibili/user/dynamic/{uid}` |
+| `bdw_max_per_cycle` | 每轮最多推送条数 | `10` |
+| `bdw_timeout` | 单请求超时（秒） | `15` |
+| `bdw_proxy` | HTTP 代理（可选） | 空 |
+| `bdw_permission_enabled` | 管理指令权限校验 | `true` |
+| `bdw_admin_ids` | 管理指令用户白名单 | `[]` |
+| `bdw_admin_role` | 群内管理角色 | `["owner", "admin"]` |
 
-> `bdw_uid_list` 只在首次加载时用于初始化本地监听列表；之后推荐用指令 `bd添加 / bd删除` 管理（数据保存在 `data/bili_dynamic_watcher/watched_uids.json`），这样不用每次改配置。
+> `bdw_uid_list` 仅首次加载时初始化本地监听列表；之后用 `bd添加 / bd删除` 管理
+> （数据在 `data/bili_dynamic_watcher/watched_uids.json`）。
 
 ## 指令（免 LLM，需 @ 机器人或唤醒词）
 
 | 指令 | 说明 | 权限 |
 | --- | --- | --- |
-| `bd列表` | 查看当前监听的账号 | 所有人 |
-| `bd添加 <UID> [备注]` | 添加监听账号（如 `bd添加 208259 兔兔`） | 管理员 |
-| `bd删除 <UID>` | 停止监听某账号 | 管理员 |
-| `bd状态` | 查看运行状态（模式/登录态/间隔/推送群/最近轮询） | 所有人 |
-| `bd测试` | 立即拉取一次并报告结果（**不推送、不记为已见**），用于排查配置 | 管理员 |
+| `bd列表` | 查看监听账号 | 所有人 |
+| `bd添加 <UID> [备注]` | 添加监听（如 `bd添加 208259 兔兔`） | 管理员 |
+| `bd删除 <UID>` | 停止监听 | 管理员 |
+| `bd状态` | 运行状态（模式/数据源/退避级别/WBI签名/RSS 地址等） | 所有人 |
+| `bd测试` | 立即拉取一次并报告（**不推送、不记已见**） | 管理员 |
 
 ## 数据存储
 
-运行数据保存在 AstrBot 数据目录（`get_astrbot_data_path()`）下：
+- `data/bili_dynamic_watcher/watched_uids.json`：监听列表（UID → 备注）
+- `data/bili_dynamic_watcher/seen_dynamics.json`：已推送动态去重（最多保留 3000 条）
 
-- `data/bili_dynamic_watcher/watched_uids.json`：监听账号列表（UID → 备注）
-- `data/bili_dynamic_watcher/seen_dynamics.json`：已推送过的动态 ID（防重复，最多保留 3000 条）
-
-插件更新/重装不会覆盖这些数据。
+> v2.0 起去重键带 `api:` / `rss:` 前缀，老数据首次启动自动迁移，
+> **升级后不会重复推送历史动态**。
 
 ## 打包
 
@@ -87,51 +108,46 @@
 python plugins/astrbot/siwu-bili-dynamic-watcher-1_0/build.py
 ```
 
-产物：`plugins/astrbot/dist/siwu-bili-dynamic-watcher-<version>.zip`（zip 内文件直接放根目录）。
+产物：`plugins/astrbot/dist/siwu-bili-dynamic-watcher-2.0.0.zip`
 
 ## 常见问题
 
-**收不到动态？**
-1. `bd状态` 看总开关、监听账号、推送群是否正常；
-2. `bd测试` 看能否拉取成功、是否命中未推送动态；
-3. follow 模式下确认关注号**已在 B 站关注目标账号**，且 `SESSDATA` 未过期（过期会报 code=-101）；
-4. 确认机器人已加入 `bdw_groups` 中的群，且 `bdw_platform_id` 与你的平台适配器一致。
+**为什么之前 1~2 天就被限制？**
+- 老版本无 WBI 签名 / 无 buvid 指纹 / 固定频率，且被风控后退避不足。v2.0 已三层加固：
+  WBI 签名 + 指纹 + 抖动退避 + RSS 兜底。仍在被限时优先自查：
+  1. `bd状态` 看「WBI 签名」是否「已启用（签名生效）」；
+  2. 关注号 SESSDATA 是否过期（code=-101）；
+  3. 服务器 IP 是否被 B 站整体风控（HTTP 412 且 RSS 正常时，切 `rss` 模式）。
 
 **报错 412 / code=-352（风控）？**
-- 增大 `bdw_poll_interval`；
-- 补充 `bdw_buvid3`；
-- 优先使用 follow 关注流模式（`bdw_mode=follow`）。
+- 插件会自动退避（间隔 ×2 直至 `bdw_backoff_max`）并尝试刷新密钥重试；
+- auto 模式下会自动切 RSS 兜底，不影响推送；
+- 长期稳定建议自建 RSSHub（或 RSSWorker 部署到 Cloudflare Worker），
+  把 `bdw_rss_base` 指向自建地址。
+
+**怎么盯微博？**
+- `bdw_mode=rss`，`bdw_rss_base` 指向（自建）RSSHub，
+  `bdw_rss_route=weibo/user/{uid}`；
+- 公共 RSSHub 实例的微博路由常要求登录 cookie，建议自建并配置 `WEIBO_COOKIES`；
+- 推送文案会显示为「【动态】xxx 发布了新动态」。
+
+**RSS 兜底没生效？**
+- 检查 `bdw_rss_base` 是否可访问（服务器 curl `https://rsshub.app/bilibili/user/dynamic/208259`）；
+- 公共实例可能限流，建议自建。
 
 **换了平台（Telegram 等）？**
-- 把 `bdw_platform_id` 改为对应适配器 ID（如 `telegram`），`bdw_groups` 填平台群会话 ID。
-- 注意：QQ 官方接口平台不支持主动推送（AstrBot 限制），请使用 OneBot v11（go-cqhttp / NapCat / Lagrange 等）或支持主动消息的平台。
-
-**Cookie 里有两条 SESSDATA，填哪条？**
-- 选 **Domain 为 `.bilibili.com`** 的那条（通常 Cookie 列表里靠后的那条）；`.biligame.com` 的是游戏站登录态，动态接口不认。两条值很相似但中间段不同，不要填错。
-
-**在 space/message/www 等多个子域下都看到 SESSDATA？**
-- 若这些行的 **Domain 列都是 `.bilibili.com`（带点）**：它们是同一条域级 Cookie 在不同来源下的重复展示，值相同，任选一条填即可。
-- 若 Domain 列是 `space.bilibili.com` / `message.bilibili.com` 这类**不带点**的主机级 Cookie：子域专属，**不会**被发送到 `api.bilibili.com`，填了无效。
-- 最稳做法：F12 → Network → 刷新页面，点开任意 `api.bilibili.com` 请求 → Request Headers → Cookie 中找 `SESSDATA=xxx`，该值就是接口实际携带的登录态。
-
-**首次安装推送了一堆历史动态？**
-- 默认已开启 `bdw_warmup`：首次启动（本地没有已见记录时）第一轮会把目标账号已有的历史动态记为已见、不推送，之后只推送新发布的动态。若希望首次也推送历史动态，把 `bdw_warmup` 改为 `false`。
-
-**`bd状态` 显示推送失败，日志提示 cannot find platform？**
-- 通常是 `bdw_platform_id` 与实际平台适配器 ID 不一致（例如你的 OneBot 适配器 ID 是 `AstrBot` 而不是 `aiocqhttp`）。
-- v1.0.2 起插件**自动探测平台 ID**：把 `bdw_platform_id` 留空，重载插件后用 `bd状态` 查看「推送平台」是否显示正确。
-
-**`bd测试` 说「没有未推送新动态」？**
-- 若提示「X 条属于监听账号但都已在已记录动态中」= 正常，说明此前轮询已处理过这些动态，等目标账号发布新动态即可；
-- 若提示「没有属于监听账号的动态」= 检查关注号是否已关注目标 / SESSDATA 是否有效 / UID 是否正确。
+- `bdw_platform_id` 填对应适配器 ID，`bdw_groups` 填平台群会话 ID；
+- 注意 QQ 官方接口不支持主动推送，请使用 OneBot v11 系（NapCat / Lagrange 等）。
 
 **SESSDATA 安全提示**
-- `SESSDATA` 等于关注号的登录凭证，明文保存在 AstrBot 配置文件中，请妥善保管服务器权限，**建议使用小号**，不要把主账号凭证填入；也不要把它粘贴到聊天/论坛等第三方环境，测试完可去 B 站「设置 → 安全中心」清除登录态使其失效。
+- SESSDATA 是关注号登录凭证，明文存在服务器配置中，**建议使用小号**；不要粘贴到第三方环境。
 
 ## 依赖
 
-- `aiohttp`（AstrBot 环境自带，见 `requirements.txt`，安装插件时自动安装）
+- `aiohttp`（AstrBot 环境自带，见 `requirements.txt`）
+- WBI 签名 / RSS 解析均为标准库实现（hashlib / urllib / xml.etree），无额外依赖
 
 ## Git
 
-插件使用独立 git 仓库（master 分支），`.gitignore` 排除 `__pycache__` / `.ruff_cache` / `dist/`；每次修改后提交，提交信息用 `v版本号: 改动说明` 风格。
+插件使用独立 git 仓库（master 分支），`.gitignore` 排除 `__pycache__` / `.ruff_cache` / `dist/`；
+每次修改后提交，提交信息用 `v版本号: 改动说明` 风格。

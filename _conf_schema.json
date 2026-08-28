@@ -7,9 +7,9 @@
   },
   "bdw_mode": {
     "description": "拉取模式",
-    "hint": "follow=关注流（推荐，需填写 bdw_sessdata，且关注号需在B站关注目标账号）；space=空间轮询（免登录，高频访问易被风控，仅建议少量账号+大间隔）",
+    "hint": "auto=自动（默认，有SESSDATA时优先follow，官方接口风控/失败自动切RSS兜底）；follow=仅关注流（需填 bdw_sessdata，关注号需已关注目标账号）；space=仅空间轮询（免登录，易风控）；rss=仅RSS订阅",
     "type": "string",
-    "default": "follow"
+    "default": "auto"
   },
   "bdw_sessdata": {
     "description": "B站登录 Cookie（SESSDATA）",
@@ -49,9 +49,27 @@
   },
   "bdw_poll_interval": {
     "description": "轮询间隔（秒）",
-    "hint": "每次拉取动态的间隔。follow 模式默认 60 秒即可；space 模式建议 120 秒以上",
+    "hint": "基础轮询间隔，默认 120 秒；触发风控后会自动×2退避直到 bdw_backoff_max，成功后再恢复",
     "type": "int",
-    "default": 60
+    "default": 120
+  },
+  "bdw_backoff_max": {
+    "description": "风控退避上限（秒）",
+    "hint": "触发风控/连续失败后间隔自动拉长，最长不超过该值。默认 3600（1小时），恢复成功后自动回到基础间隔",
+    "type": "int",
+    "default": 3600
+  },
+  "bdw_rss_base": {
+    "description": "RSS 订阅源地址（RSSHub/RSSWorker，兜底用）",
+    "hint": "如 https://rsshub.app 或自建 https://rss.example.com；留空则 auto 模式官方接口失败时不做 RSS 兜底。微博可自建 RSSHub 后把 bdw_rss_route 改为 weibo/user/{uid}",
+    "type": "string",
+    "default": ""
+  },
+  "bdw_rss_route": {
+    "description": "RSS 订阅路由模板",
+    "hint": "默认 bilibili/user/dynamic/{uid}（哔哩哔哩动态）；微博：weibo/user/{uid}；需包含 {uid} 占位符",
+    "type": "string",
+    "default": "bilibili/user/dynamic/{uid}"
   },
   "bdw_max_per_cycle": {
     "description": "每轮最多推送条数",
