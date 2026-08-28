@@ -14,6 +14,7 @@ sys.path.insert(0, _PLUGIN_DIR)
 import policy  # noqa: E402
 import rss_feed  # noqa: E402
 import wbi  # noqa: E402
+import rules  # noqa: E402
 
 # bili_api.py 内部使用相对导入（from . import wbi），测试时把它作为一个包导入
 import types  # noqa: E402
@@ -174,6 +175,92 @@ class TestBiliApi(unittest.TestCase):
         self.assertTrue(err.risk)
         err2 = BiliAPIError("过期", code=-101, risk=False)
         self.assertFalse(err2.risk)
+
+
+
+DRAW_ITEM = {
+    "id_str": "a1",
+    "type": "DYNAMIC_TYPE_DRAW",
+    "modules": {
+        "module_dynamic": {
+            "desc": {"text": "新图"},
+            "major": {
+                "draw": {
+                    "items": [
+                        {"src": "https://i0.hdslb.com/1.jpg"},
+                        {"src": "https://i0.hdslb.com/2.jpg"},
+                    ]
+                }
+            },
+        }
+    },
+}
+
+FORWARD_ITEM = {
+    "id_str": "a2",
+    "type": "DYNAMIC_TYPE_FORWARD",
+    "orig": {
+        "modules": {
+            "module_dynamic": {
+                "desc": {"text": "原动态内容"},
+                "major": {"draw": {"items": [{"src": "https://i0.hdslb.com/orig.jpg"}]}},
+            }
+        }
+    },
+}
+
+LOTTERY_ITEM = {
+    "id_str": "a3",
+    "type": "DYNAMIC_TYPE_WORD",
+    "modules": {"module_dynamic": {"desc": {"text": "转发本条动态参与抽奖送周边！"}}},
+}
+
+
+class TestRules(unittest.TestCase):
+    def test_item_images_draw(self):
+        imgs = rules.item_images(DRAW_ITEM)
+        self.assertEqual(imgs, ["https://i0.hdslb.com/1.jpg", "https://i0.hdslb.com/2.jpg"])
+
+    def test_item_images_forward_orig(self):
+        imgs = rules.item_images(FORWARD_ITEM)
+        self.assertIn("https://i0.hdslb.com/orig.jpg", imgs)
+
+    def test_item_images_rss(self):
+        item = {
+            "kind": "rss",
+            "_rss": {
+                "images": ["https://i0.hdslb.com/r1.jpg", "https://i0.hdslb.com/r2.jpg"]
+            },
+        }
+        self.assertEqual(
+            rules.item_images(item),
+            ["https://i0.hdslb.com/r1.jpg", "https://i0.hdslb.com/r2.jpg"],
+        )
+
+    def test_forward_filter_default(self):
+        ok, reason = rules.should_push(FORWARD_ITEM, {})
+        self.assertFalse(ok)
+        self.assertIn("转发", reason)
+        # 配置关闭忽略后放行
+        ok2, _ = rules.should_push(FORWARD_ITEM, {"bdw_ignore_forward": False})
+        self.assertTrue(ok2)
+
+    def test_lottery_filter_default(self):
+        ok, reason = rules.should_push(LOTTERY_ITEM, {})
+        self.assertFalse(ok)
+        self.assertIn("抽奖", reason)
+        ok2, _ = rules.should_push(LOTTERY_ITEM, {"bdw_ignore_lottery": False})
+        self.assertTrue(ok2)
+
+    def test_normal_word_push(self):
+        item = {
+            "id_str": "a4",
+            "type": "DYNAMIC_TYPE_WORD",
+            "modules": {"module_dynamic": {"desc": {"text": "普通动态"}}},
+        }
+        ok, reason = rules.should_push(item, {})
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
 
 
 if __name__ == "__main__":
