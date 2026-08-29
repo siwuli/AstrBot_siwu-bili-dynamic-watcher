@@ -56,6 +56,7 @@ DYNAMIC_TYPE_NAMES = {
     "DYNAMIC_TYPE_MATCH": "赛事动态",
     "DYNAMIC_TYPE_COMMON": "普通动态",
     "DYNAMIC_TYPE_RSS": "新动态",
+    "DYNAMIC_TYPE_OPUS": "图文动态",
 }
 
 
@@ -81,6 +82,12 @@ def _extract_dynamic_text(dyn: dict, dtype: str) -> str:
     """从动态的 module_dynamic 中提取可读文本摘要。"""
     desc = str(((dyn or {}).get("desc") or {}).get("text") or "").strip()
     major = (dyn or {}).get("major") or {}
+    # 图文动态已改版 opus 格式：正文在 major.opus.summary.text（feed 需 features=itemOpusStyle）
+    opus = major.get("opus") or {}
+    if isinstance(opus, dict):
+        opus_text = str((opus.get("summary") or {}).get("text") or "").strip()
+        if opus_text:
+            desc = opus_text
     if dtype == "DYNAMIC_TYPE_AV" and major.get("archive"):
         title = str(major["archive"].get("title") or "").strip()
         if title:
@@ -122,7 +129,13 @@ def format_dynamic_parts(item: dict) -> dict:
     if dtype == "DYNAMIC_TYPE_RSS":
         link = str((item.get("_rss") or {}).get("link") or "").strip()
     else:
-        link = f"https://t.bilibili.com/{did}" if did else ""
+        opus_jump = str(
+            ((dyn.get("major") or {}).get("opus") or {}).get("jump_url") or ""
+        ).strip()
+        if opus_jump:
+            link = opus_jump if opus_jump.startswith("http") else "https:" + opus_jump
+        else:
+            link = f"https://t.bilibili.com/{did}" if did else ""
 
     prefix = "【动态】" if dtype == "DYNAMIC_TYPE_RSS" else "【B站新动态】"
     header = f"{prefix}{name} 发布了{type_name}"

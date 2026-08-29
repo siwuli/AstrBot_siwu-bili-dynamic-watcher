@@ -24,6 +24,8 @@ logger = logging.getLogger("astrbot")
 
 # 关注动态流接口（拉取关注账号的最新动态，需登录态）
 FEED_FOLLOW_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all"
+# 图文动态已改版 opus 格式：开启 opus 风格返回，正文在 major.opus.summary
+FEED_FEATURES = "itemOpusStyle"
 # 用户空间动态接口（按 UID 拉取某个账号的动态，免登录）
 FEED_SPACE_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
 # WBI 密钥来源（登录态信息 + wbi_img）
@@ -189,12 +191,22 @@ class BiliDynamicClient:
                 "关注流模式需要配置 bdw_sessdata（B站登录 Cookie）",
                 risk=False,
             )
-        params = {"type": "all", "page": page, "timezone_offset": -480}
+        params = {
+            "type": "all",
+            "page": page,
+            "timezone_offset": -480,
+            "features": FEED_FEATURES,
+        }
         return await self._get_json(FEED_FOLLOW_URL, params, require_wbi=True)
 
     async def fetch_space_feed(self, uid: str, offset: str = "") -> dict:
         """拉取指定 UID 的用户空间动态（免登录）。"""
-        params = {"host_mid": str(uid), "offset": offset, "timezone_offset": -480}
+        params = {
+            "host_mid": str(uid),
+            "offset": offset,
+            "timezone_offset": -480,
+            "features": FEED_FEATURES,
+        }
         return await self._get_json(FEED_SPACE_URL, params, require_wbi=True)
 
     async def fetch_text(self, url: str) -> str:

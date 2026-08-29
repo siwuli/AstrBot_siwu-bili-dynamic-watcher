@@ -72,6 +72,11 @@ def item_images(item, limit=MAX_IMAGES):
         arch = major.get("archive") or {}
         if isinstance(arch, dict):
             add(arch.get("pic") or arch.get("cover"))
+        opus = major.get("opus") or {}
+        if isinstance(opus, dict):
+            for pic in opus.get("pics") or []:
+                if isinstance(pic, dict):
+                    add(pic.get("url"))
         orig = node.get("orig")
         if isinstance(orig, dict):
             walk(orig, depth + 1)
