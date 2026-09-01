@@ -73,12 +73,14 @@ def _norm_list(value) -> list[str]:
 
 def _truncate(text: str, limit: int = MAX_DYNAMIC_TEXT_LEN) -> str:
     text = (text or "").strip()
-    if len(text) > limit:
-        return text[: limit - 1] + "…"
-    return text
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
-def _extract_dynamic_text(dyn: dict, dtype: str) -> str:
+def _extract_dynamic_text(
+    dyn: dict, dtype: str, limit: int = MAX_DYNAMIC_TEXT_LEN
+) -> str:
     """从动态的 module_dynamic 中提取可读文本摘要。"""
     desc = str(((dyn or {}).get("desc") or {}).get("text") or "").strip()
     major = (dyn or {}).get("major") or {}
@@ -103,10 +105,10 @@ def _extract_dynamic_text(dyn: dict, dtype: str) -> str:
         content = str(major["live_rcmd"].get("content") or "").strip()
         if content:
             desc = content if not desc else f"{desc}｜{content}"
-    return _truncate(desc)
+    return _truncate(desc, limit=limit)
 
 
-def format_dynamic_parts(item: dict) -> dict:
+def format_dynamic_parts(item: dict, max_text_len: int = MAX_DYNAMIC_TEXT_LEN) -> dict:
     """把一条动态拆成推送分段：header（标题行）/ body（正文）/ footer（时间链接）。
 
     图片由 rules.item_images 另行提取，推送时插入 body 与 footer 之间，
@@ -118,7 +120,7 @@ def format_dynamic_parts(item: dict) -> dict:
     dtype = str(item.get("type") or "DYNAMIC_TYPE_WORD")
     type_name = DYNAMIC_TYPE_NAMES.get(dtype, "新动态")
     name = str(author.get("name") or "").strip() or "未知UP主"
-    text = _extract_dynamic_text(dyn, dtype)
+    text = _extract_dynamic_text(dyn, dtype, max_text_len)
     pub_ts = int(author.get("pub_ts") or 0)
     time_str = (
         datetime.fromtimestamp(pub_ts).astimezone().strftime("%m-%d %H:%M")
@@ -161,9 +163,9 @@ def format_dynamic_parts(item: dict) -> dict:
     }
 
 
-def format_dynamic(item: dict) -> str:
+def format_dynamic(item: dict, max_text_len: int = MAX_DYNAMIC_TEXT_LEN) -> str:
     """把一条动态格式化为纯文本（兼容旧用途/调试）。"""
-    parts = format_dynamic_parts(item)
+    parts = format_dynamic_parts(item, max_text_len)
     segs = [parts["header"]]
     if parts["body"]:
         segs.append(parts["body"])
@@ -274,6 +276,13 @@ class BiliDynamicWatcherPlugin(star.Star):
             or DEFAULT_BACKOFF_MAX
         )
         return policy.jittered_interval(base, self._backoff_level, cap)
+
+    def _max_text_len(self) -> int:
+        """动态正文最大推送长度（字符）；0 表示不截断、完整推送。"""
+        try:
+            return max(0, int(self.config.get("bdw_max_text_len", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
 
     async def _poll_once(self) -> None:
         if not bool(self.config.get("bdw_enabled", True)):
@@ -401,7 +410,7 @@ class BiliDynamicWatcherPlugin(star.Star):
         for item in to_push:
             try:
                 if await self._push_to_groups(
-                    format_dynamic_parts(item), item_images(item)
+                    format_dynamic_parts(item, self._max_text_len()), item_images(item)
                 ):
                     pushed_ok += 1
                 else:
@@ -520,7 +529,10 @@ class BiliDynamicWatcherPlugin(star.Star):
         """推送动态（分段文本 + 可附带图片）到所有目标群。返回是否有至少一个群发送成功。"""
         groups = _norm_list(self.config.get("bdw_groups"))
         if not groups:
-            logger.warning("未配置推送目标群（bdw_groups），动态未发送：%s", text[:60])
+            logger.warning(
+                "未配置推送目标群（bdw_groups），动态未发送：%s",
+                (parts.get("header") or parts.get("body") or "")[:60],
+            )
             return False
         candidates = self._push_platform_candidates()
         # 顺序：标题行 → 正文 → 图片 → 时间/链接

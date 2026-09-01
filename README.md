@@ -3,7 +3,7 @@
 监听指定账号（B 站 UP 主、微博博主等）的最新动态，**新动态自动推送到配置的 QQ 群**。
 纯后台轮询 + 主动推送，**不依赖 LLM**，对话不会被打扰。
 
-> 插件 id：`bili_dynamic_watcher`　当前版本：`2.1.0`
+> 插件 id：`bili_dynamic_watcher`　当前版本：`2.1.4`
 
 ## 为什么会有 v2.0（强壮化）
 
@@ -85,6 +85,7 @@ v2.0 的应对（三层）：
 | `bdw_rss_base` | RSS 源地址（如 `https://rsshub.app` 或自建）| 空 |
 | `bdw_rss_route` | RSS 路由模板（须含 `{uid}` 占位符） | `bilibili/user/dynamic/{uid}` |
 | `bdw_max_per_cycle` | 每轮最多推送条数 | `10` |
+| `bdw_max_text_len` | 动态正文最大推送长度（字符，`0`=完整推送不截断） | `0` |
 | `bdw_push_images` | 推送时附带动态图片（最多 9 张） | `true` |
 | `bdw_ignore_forward` | 忽略转发动态（不推送） | `true` |
 | `bdw_ignore_lottery` | 忽略抽奖/中奖类动态 | `true` |

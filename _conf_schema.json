@@ -101,6 +101,12 @@
     "type": "int",
     "default": 10
   },
+  "bdw_max_text_len": {
+    "description": "动态正文最大推送长度（字符）",
+    "hint": "0=不截断，完整推送；B站动态正文可能很长，若遇到平台单条消息长度限制（如 QQ 约 5000 字）再按需调小",
+    "type": "int",
+    "default": 0
+  },
   "bdw_timeout": {
     "description": "接口请求超时（秒）",
     "hint": "单次请求 B 站接口的超时时间",
