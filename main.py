@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 from datetime import datetime
 
 from astrbot.api import star
@@ -174,6 +175,49 @@ def format_dynamic(item: dict, max_text_len: int = MAX_DYNAMIC_TEXT_LEN) -> str:
     return "\n".join(segs)
 
 
+# ----------------------------------------------------------------------
+# 多平台兼容
+# ----------------------------------------------------------------------
+# 各适配器的「群」会话标识形态并不统一，不能假定为纯数字：
+#   - OneBot v11 / aiocqhttp：纯数字 QQ 群号，如 602519154
+#   - QQ 官方机器人        ：十六进制 group_openid，如 8FF0A5DE2922DE19925E1BE9EF3D58A2
+#   - Telegram            ：负数 chat_id，如 -1001234567890
+#   - Discord             ：雪花 ID
+# 会话键由 "平台ID:消息类型:群ID" 拼接，因此群 ID 只要求非空且不含分隔符。
+_GROUP_ID_RE = re.compile(r"^[^:\s]{1,128}$")
+
+
+def _is_valid_group_id(gid) -> bool:
+    """平台无关的群标识校验：非空且不含会话分隔符 ':'。"""
+    return bool(_GROUP_ID_RE.match(str(gid or "").strip()))
+
+
+def _short_id(value, keep: int = 8) -> str:
+    """长 ID 显示时截断（QQ 官方 group_openid 有 32 位，直接打印会刷屏）。"""
+    text = str(value or "").strip()
+    if len(text) <= keep * 2:
+        return text
+    return f"{text[:keep]}…{text[-4:]}"
+
+
+def _parse_target(raw) -> tuple[str, str]:
+    """解析 bdw_groups 的单个目标为 (platform_id, group_id)，便于多框架混用。
+
+    支持两种写法：
+      - "602519154"                    → 平台留空，推送时自动探测可用适配器
+      - "qq_official_bot:8FF0A5DE..."  → 指定平台，精确投递（换平台时改这行配置即可）
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", ""
+    if ":" in text:
+        pid, _, gid = text.partition(":")
+        pid, gid = pid.strip(), gid.strip()
+        if pid and _is_valid_group_id(gid):
+            return pid, gid
+    return "", text
+
+
 class BiliDynamicWatcherPlugin(star.Star):
     """B站动态监听插件。"""
 
@@ -184,6 +228,8 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._http: BiliDynamicClient | None = None
         self._lock: asyncio.Lock | None = None
         self._platform_ids: list[str] = []
+        # group_id -> 最近一次推送成功的平台 ID，避免每轮都遍历候选平台
+        self._push_platform_cache: dict[str, str] = {}
         self._seen: set[str] = set()
         self._watching: dict[str, str] = {}  # uid -> 备注
         self._warmup_pending = False
@@ -526,7 +572,13 @@ class BiliDynamicWatcherPlugin(star.Star):
     # 推送
     # ------------------------------------------------------------------
     async def _push_to_groups(self, parts: dict, images: list | None = None) -> bool:
-        """推送动态（分段文本 + 可附带图片）到所有目标群。返回是否有至少一个群发送成功。"""
+        """推送动态（分段文本 + 可附带图片）到所有目标群。返回是否有至少一个群发送成功。
+
+        推送目标 bdw_groups 支持两种写法：
+          - "602519154"                    → 平台留空，自动探测可用适配器
+          - "qq_official_bot:8FF0A5DE..."  → 指定平台，精确投递
+        换平台时只需修改配置里的这一行，无需改代码。
+        """
         groups = _norm_list(self.config.get("bdw_groups"))
         if not groups:
             logger.warning(
@@ -548,42 +600,67 @@ class BiliDynamicWatcherPlugin(star.Star):
         if parts.get("footer"):
             chain.message(parts["footer"])
         sent = 0
-        for gid in groups:
-            if not gid.isdigit():
-                logger.warning("跳过非数字群号: %s", gid)
+        for raw in groups:
+            pid_hint, gid = _parse_target(raw)
+            if not _is_valid_group_id(gid):
+                logger.warning("跳过非法群标识: %s", raw)
                 continue
-            for pid in candidates:
+            if pid_hint:
+                # 显式指定平台：只投递该平台，不做回退
+                pids = [pid_hint]
+            else:
+                cached = self._push_platform_cache.get(gid)
+                pids = ([cached] if cached else []) + [
+                    p for p in candidates if p != cached
+                ]
+            ok_any = False
+            for pid in pids:
+                if not pid:
+                    continue
                 session = f"{pid}:{MessageType.GROUP_MESSAGE.value}:{gid}"
                 try:
                     ok = await self.context.send_message(session, chain)
                 except Exception as e:  # noqa: BLE001
-                    logger.error("推送群 %s（平台 %s）失败: %s", gid, pid, e)
+                    logger.error("推送群 %s（平台 %s）失败: %s", _short_id(gid), pid, e)
                     continue
                 if ok:
-                    sent += 1
+                    ok_any = True
+                    self._push_platform_cache[gid] = pid
                     break
+            if ok_any:
+                sent += 1
+            else:
                 logger.warning(
-                    "推送群 %s 失败：平台 %s 未匹配到运行中的适配器（可留空 bdw_platform_id 自动探测）",
-                    gid,
-                    pid,
+                    "推送群 %s 失败：未匹配到运行中的适配器"
+                    "（可在 bdw_groups 写成 平台ID:群ID 精确指定，如 qq_official_bot:8FF0...）",
+                    _short_id(gid),
                 )
         return sent > 0
 
+    def _live_platform_ids(self) -> list[str]:
+        """当前运行中的平台适配器 ID。
+
+        平台适配器可能晚于插件初始化，这里在推送时惰性重探测，
+        换平台后无需重启插件即可识别到新平台。
+        """
+        detected = self._detect_platform_ids()
+        if detected:
+            self._platform_ids = detected
+        return list(self._platform_ids)
+
     def _push_platform_candidates(self) -> list[str]:
-        """推送时尝试的平台 ID 列表：优先配置值，其次自动探测到的平台 ID。"""
+        """可用于推送的平台 ID 列表：配置值优先，其次当前运行中的平台。
+
+        不再硬编码回退到 "aiocqhttp"，以便在任意适配器（含 QQ 官方机器人）
+        上直接工作。
+        """
         configured = str(self.config.get("bdw_platform_id", "") or "").strip()
-        # 平台适配器可能晚于插件初始化，这里在推送时惰性重探测，避免加载时探测为空
-        detected = self._platform_ids
-        if not detected:
-            detected = self._detect_platform_ids()
-            if detected:
-                self._platform_ids = detected
         candidates: list[str] = []
-        for pid in ([configured] if configured else []) + detected:
-            if pid and pid not in candidates:
+        if configured:
+            candidates.append(configured)
+        for pid in self._live_platform_ids():
+            if pid not in candidates:
                 candidates.append(pid)
-        if not candidates:
-            candidates = ["aiocqhttp"]
         return candidates
 
     def _detect_platform_ids(self) -> list[str]:
@@ -629,6 +706,27 @@ class BiliDynamicWatcherPlugin(star.Star):
             lines.append(f"- {uid}（{remark or '无备注'}）")
         event.stop_event()
         yield event.make_result().message("\n".join(lines))
+
+    @filter.command("bd本群")
+    async def bd_here(self, event: AstrMessageEvent):
+        """显示当前群的平台限定标识，便于填写到 bdw_groups 配置。"""
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            event.stop_event()
+            yield event.make_result().message("本指令需要在群聊中使用。")
+            return
+        pid = event.get_platform_id() or ""
+        gid = str(event.get_group_id() or "").strip()
+        if not pid or not _is_valid_group_id(gid):
+            event.stop_event()
+            yield event.make_result().message("无法识别当前群信息，请稍后再试。")
+            return
+        event.stop_event()
+        yield event.make_result().message(
+            "当前群信息（可直接填入插件配置 bdw_groups）：\n"
+            f"- 平台 ID：{pid}\n"
+            f"- 群 ID：{gid}\n"
+            f"- 精确投递写法：{pid}:{gid}"
+        )
 
     @filter.command("bd添加")
     async def bd_add(self, event: AstrMessageEvent):
@@ -724,7 +822,8 @@ class BiliDynamicWatcherPlugin(star.Star):
             f"- WBI 签名：{self._wbi_text()}",
             f"- RSS 兜底：{self._rss_base() or '未配置（auto 模式不会切 RSS）'}",
             f"- 监听账号：{len(watched)} 个",
-            f"- 推送群：{len(groups)} 个（{', '.join(groups) or '未配置'}）",
+            f"- 推送群：{len(groups)} 个"
+            f"（{', '.join(_short_id(g) for g in groups[:8]) or '未配置'}）",
             f"- 推送平台：{', '.join(self._push_platform_candidates()) or '（未探测到）'}",
             f"- 推送规则：图片{'开' if bool(self.config.get('bdw_push_images', True)) else '关'}；"
             f"转发{'忽略' if bool(self.config.get('bdw_ignore_forward', True)) else '推送'}；"
