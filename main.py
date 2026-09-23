@@ -709,7 +709,11 @@ class BiliDynamicWatcherPlugin(star.Star):
 
     @filter.command("bd本群")
     async def bd_here(self, event: AstrMessageEvent):
-        """显示当前群的平台限定标识，便于填写到 bdw_groups 配置。"""
+        """显示当前群标识，便于填写到 bdw_groups 配置。
+
+        装了 platform_alias 之后，get_group_id() 已经是真实群号，
+        写成纯群号即可跨平台通用，不用再绑定平台 ID。
+        """
         if event.get_message_type() != MessageType.GROUP_MESSAGE:
             event.stop_event()
             yield event.make_result().message("本指令需要在群聊中使用。")
@@ -725,7 +729,10 @@ class BiliDynamicWatcherPlugin(star.Star):
             "当前群信息（可直接填入插件配置 bdw_groups）：\n"
             f"- 平台 ID：{pid}\n"
             f"- 群 ID：{gid}\n"
-            f"- 精确投递写法：{pid}:{gid}"
+            f"- 推荐写法：{gid}\n"
+            "  （跨平台通用；配合 platform_alias 换适配器后不用改配置）\n"
+            f"- 精确投递写法：{pid}:{gid}\n"
+            "  （只在同类型适配器开了多个时才需要）"
         )
 
     @filter.command("bd添加")
