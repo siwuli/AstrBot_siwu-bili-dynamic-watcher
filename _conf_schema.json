@@ -23,6 +23,18 @@
     "type": "string",
     "default": ""
   },
+  "bdw_bili_jct": {
+    "description": "B站 Cookie（bili_jct，Cookie 自动刷新用）",
+    "hint": "与 bdw_sessdata 同一账号的 bili_jct（csrftoken）。浏览器 F12 → Application → Cookies → .bilibili.com → 复制 bili_jct 的值。不填则无法自动刷新 Cookie",
+    "type": "string",
+    "default": ""
+  },
+  "bdw_refresh_token": {
+    "description": "B站持久化刷新口令（ac_time_value）",
+    "hint": "浏览器 F12 → Application → Local Storage → https://www.bilibili.com → 复制 ac_time_value 的值（32 位）。Cookie 自动刷新必需；每次刷新成功后 B 站会返回新口令，插件会自动保存到 data/bili_dynamic_watcher/cookies.json，无需手动更新",
+    "type": "string",
+    "default": ""
+  },
   "bdw_uid_list": {
     "description": "初始监听 UID 列表",
     "hint": "每行一个B站 UID（UP主的 mid）。仅在首次加载时写入本地监听列表，之后用「bd添加 / bd删除」指令管理。关注流模式需用关注号关注这些账号",
@@ -56,6 +68,18 @@
   "bdw_backoff_max": {
     "description": "风控退避上限（秒）",
     "hint": "触发风控/连续失败后间隔自动拉长，最长不超过该值。默认 3600（1小时），恢复成功后自动回到基础间隔",
+    "type": "int",
+    "default": 3600
+  },
+  "bdw_cookie_refresh": {
+    "description": "自动刷新 B 站 Cookie",
+    "hint": "开启后定期检查 cookie/info，需要时自动刷新 SESSDATA 并持久化；轮询遇到 -101 也会立即尝试刷新并重试。需填写 bdw_bili_jct 与 bdw_refresh_token",
+    "type": "bool",
+    "default": true
+  },
+  "bdw_cookie_check_interval": {
+    "description": "Cookie 刷新检查间隔（秒）",
+    "hint": "定期调用 cookie/info 判断是否需要刷新的间隔，最小 300 秒。默认 3600（1 小时）",
     "type": "int",
     "default": 3600
   },

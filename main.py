@@ -19,6 +19,7 @@ import logging
 import os
 import random
 import re
+import time
 from datetime import datetime
 
 from astrbot.api import star
@@ -36,9 +37,11 @@ logger = logging.getLogger("astrbot")
 DATA_DIR = os.path.join(get_astrbot_data_path(), "bili_dynamic_watcher")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_dynamics.json")
 WATCH_FILE = os.path.join(DATA_DIR, "watched_uids.json")
+COOKIE_FILE = os.path.join(DATA_DIR, "cookies.json")
 
 DEFAULT_POLL_INTERVAL = 120
 DEFAULT_BACKOFF_MAX = 3600
+DEFAULT_COOKIE_CHECK_INTERVAL = 3600
 MIN_POLL_INTERVAL = 10
 MAX_SEEN_KEEP = 3000
 MAX_DYNAMIC_TEXT_LEN = 120
@@ -218,6 +221,28 @@ def _parse_target(raw) -> tuple[str, str]:
     return "", text
 
 
+def _load_cookie_store() -> dict:
+    """读取刷新后的 Cookie 持久化文件。"""
+    try:
+        if os.path.exists(COOKIE_FILE):
+            with open(COOKIE_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:  # noqa: BLE001
+        logger.error("读取 Cookie 缓存失败: %s", e)
+    return {}
+
+
+def _save_cookie_store(data: dict) -> None:
+    """原子写入 Cookie 持久化文件。"""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = COOKIE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, COOKIE_FILE)
+
+
 class BiliDynamicWatcherPlugin(star.Star):
     """B站动态监听插件。"""
 
@@ -235,6 +260,11 @@ class BiliDynamicWatcherPlugin(star.Star):
         self._warmup_pending = False
         self._backoff_level = 0
         self._last_source = ""
+        # Cookie 自动刷新状态
+        self._cookie_store: dict = {}
+        self._cookie_last_check = 0.0
+        self._cookie_last_error = ""
+        self._cookie_last_ok = 0.0
         self._last_poll: dict = {
             "time": 0,
             "new": 0,
@@ -257,12 +287,22 @@ class BiliDynamicWatcherPlugin(star.Star):
             self.config.get("bdw_warmup", True)
         ) and not os.path.exists(SEEN_FILE)
         self._platform_ids = self._detect_platform_ids()
+        self._cookie_store = _load_cookie_store()
+        sessdata, bili_jct, refresh_token = self._resolve_credentials()
         self._http = BiliDynamicClient(
-            sessdata=str(self.config.get("bdw_sessdata", "") or ""),
+            sessdata=sessdata,
             buvid3=str(self.config.get("bdw_buvid3", "") or ""),
             timeout=float(self.config.get("bdw_timeout", 15) or 15),
             proxy=str(self.config.get("bdw_proxy", "") or ""),
+            bili_jct=bili_jct,
+            dede_userid=str(self._cookie_store.get("dede_userid") or ""),
+            refresh_token=refresh_token,
         )
+        if self._cookie_refresh_enabled() and not self._http.has_refresh_token:
+            logger.warning(
+                "B站 Cookie 自动刷新已开启，但缺少 bdw_refresh_token"
+                "（浏览器 localStorage 的 ac_time_value）；登录态失效时将无法自动刷新"
+            )
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._poll_loop())
             logger.info(
@@ -330,6 +370,147 @@ class BiliDynamicWatcherPlugin(star.Star):
         except (TypeError, ValueError):
             return 0
 
+    # ------------------------------------------------------------------
+    # Cookie 自动刷新
+    # ------------------------------------------------------------------
+    def _cookie_refresh_enabled(self) -> bool:
+        return bool(self.config.get("bdw_cookie_refresh", True))
+
+    def _resolve_credentials(self) -> tuple[str, str, str]:
+        """决定使用哪套登录态：配置值作为「种子」，本地刷新缓存优先。
+
+        若配置里的 SESSDATA 被改动（种子变了），说明用户手动换了登录态，
+        此时丢弃旧的刷新结果，以配置为准。
+        """
+        cfg_sess = str(self.config.get("bdw_sessdata", "") or "").strip()
+        cfg_jct = str(self.config.get("bdw_bili_jct", "") or "").strip()
+        cfg_token = str(self.config.get("bdw_refresh_token", "") or "").strip()
+        store = self._cookie_store or {}
+        base = str(store.get("base_sessdata") or "").strip()
+        base_token = str(store.get("base_refresh_token") or "").strip()
+        if store and cfg_sess and base == cfg_sess:
+            # 用户手动改了 refresh_token → 以配置为准，重新开始一条刷新链
+            if cfg_token and base_token and cfg_token != base_token:
+                return cfg_sess, cfg_jct, cfg_token
+            return (
+                str(store.get("sessdata") or cfg_sess).strip(),
+                str(store.get("bili_jct") or cfg_jct).strip(),
+                str(store.get("refresh_token") or cfg_token).strip(),
+            )
+        return cfg_sess, cfg_jct, cfg_token
+
+    def _persist_cookies(self, snapshot: dict, old_token: str = "") -> None:
+        """把刷新后的登录态写入数据目录，供重启后继续使用。"""
+        store = {
+            "sessdata": str(snapshot.get("sessdata") or ""),
+            "bili_jct": str(snapshot.get("bili_jct") or ""),
+            "dede_userid": str(snapshot.get("dede_userid") or ""),
+            "refresh_token": str(snapshot.get("refresh_token") or ""),
+            "base_sessdata": str(self.config.get("bdw_sessdata", "") or "").strip(),
+            "base_refresh_token": str(
+                self.config.get("bdw_refresh_token", "") or ""
+            ).strip(),
+            "old_refresh_token": str(old_token or ""),
+            "updated_at": int(time.time()),
+        }
+        self._cookie_store = store
+        try:
+            _save_cookie_store(store)
+        except Exception as e:  # noqa: BLE001
+            logger.error("持久化刷新后的 Cookie 失败: %s", e)
+            self._cookie_last_error = f"写入失败：{e}"[:200]
+            return
+        self._cookie_last_ok = time.time()
+        self._cookie_last_error = ""
+
+    async def _do_refresh_cookie(self, reason: str) -> bool:
+        """执行一次 Cookie 刷新并持久化；成功返回 True。"""
+        if not self._http:
+            return False
+        try:
+            result = await self._http.refresh_cookie()
+        except BiliAPIError as e:
+            self._cookie_last_error = f"刷新失败：{e}"[:200]
+            logger.error("B站 Cookie 自动刷新失败（%s）：%s", reason, e)
+            return False
+        self._persist_cookies(
+            result.get("snapshot") or {}, result.get("old_refresh_token") or ""
+        )
+        logger.info(
+            "B站 Cookie 自动刷新成功（%s）：SESSDATA/bili_jct 已更新%s",
+            reason,
+            "" if result.get("confirmed") else "（confirm 未成功，新 Cookie 仍生效）",
+        )
+        return True
+
+    async def _maybe_check_cookie(self, force: bool = False) -> None:
+        """按间隔检查 cookie/info，需要刷新时自动刷新。"""
+        if not self._cookie_refresh_enabled() or not self._http:
+            return
+        if not self._http.has_refresh_token and not force:
+            return
+        base_iv = int(
+            self.config.get("bdw_cookie_check_interval", DEFAULT_COOKIE_CHECK_INTERVAL)
+            or DEFAULT_COOKIE_CHECK_INTERVAL
+        )
+        interval = max(300, base_iv)
+        now = time.time()
+        if not force and (now - self._cookie_last_check) < interval:
+            return
+        self._cookie_last_check = now
+        try:
+            info = await self._http.check_cookie_refresh()
+        except BiliAPIError as e:
+            self._cookie_last_error = f"检查失败：{e}"[:200]
+            logger.debug("Cookie 刷新状态检查失败: %s", e)
+            return
+        if info.get("refresh") or force:
+            await self._do_refresh_cookie("定时检查" if not force else "手动触发")
+        else:
+            self._cookie_last_error = ""
+
+    async def _fetch_with_fallback(self, mode: str) -> tuple[list[dict], str]:
+        """拉取动态：登录态失效先自动刷新 Cookie 重试，auto 模式再 RSS 兜底。"""
+        try:
+            items, source = await self._fetch_latest_items(mode)
+            self._backoff_level = policy.reset_backoff_level()
+            return items, source
+        except BiliAPIError as e:
+            err: Exception = e
+        if (
+            getattr(err, "code", None) == -101
+            and self._cookie_refresh_enabled()
+            and self._http is not None
+            and self._http.has_refresh_token
+        ):
+            if await self._do_refresh_cookie("登录态失效(-101)"):
+                try:
+                    items, source = await self._fetch_latest_items(mode)
+                    self._backoff_level = policy.reset_backoff_level()
+                    return items, source
+                except Exception as e2:  # noqa: BLE001
+                    err = e2
+        if mode == "auto" and self._rss_base():
+            logger.warning("官方接口拉取失败（%s），本轮改用 RSS 兜底", err)
+            try:
+                items, _src = await self._fetch_latest_items("rss")
+                self._backoff_level = policy.reset_backoff_level()
+                return items, "rss(兜底)"
+            except BiliAPIError as e2:
+                logger.error("官方接口与 RSS 兜底均失败: %s；%s", err, e2)
+                self._last_poll["error"] = f"{err}；RSS兜底失败: {e2}"[:200]
+            except Exception as e2:  # noqa: BLE001
+                logger.error("官方接口与 RSS 兜底均失败（未知异常）: %s；%s", err, e2)
+                self._last_poll["error"] = f"{err}；RSS兜底异常: {e2}"[:200]
+            self._backoff_level = policy.next_backoff_level(self._backoff_level)
+        else:
+            logger.error("拉取B站动态失败: %s", err)
+            self._last_poll["error"] = str(err)[:200]
+            self._backoff_level = policy.next_backoff_level(self._backoff_level)
+        if isinstance(err, BiliAPIError):
+            raise err
+        raise BiliAPIError(str(err)) from err
+
     async def _poll_once(self) -> None:
         if not bool(self.config.get("bdw_enabled", True)):
             return
@@ -337,33 +518,13 @@ class BiliDynamicWatcherPlugin(star.Star):
         if not watched:
             return
         mode = str(self.config.get("bdw_mode", "auto") or "auto").strip().lower()
+        await self._maybe_check_cookie()
         try:
-            items, source = await self._fetch_latest_items(mode)
-            self._backoff_level = policy.reset_backoff_level()
-        except BiliAPIError as e:
-            if mode == "auto" and self._rss_base():
-                logger.warning("官方接口拉取失败（%s），本轮改用 RSS 兜底", e)
-                try:
-                    items, _src = await self._fetch_latest_items("rss")
-                    source = "rss(兜底)"
-                    self._backoff_level = policy.reset_backoff_level()
-                except BiliAPIError as e2:
-                    logger.error("官方接口与 RSS 兜底均失败: %s；%s", e, e2)
-                    self._last_poll["error"] = f"{e}；RSS兜底失败: {e2}"[:200]
-                    self._backoff_level = policy.next_backoff_level(self._backoff_level)
-                    return
-                except Exception as e2:  # noqa: BLE001
-                    logger.error("官方接口与 RSS 兜底均失败（未知异常）: %s；%s", e, e2)
-                    self._last_poll["error"] = f"{e}；RSS兜底异常: {e2}"[:200]
-                    self._backoff_level = policy.next_backoff_level(self._backoff_level)
-                    return
-            else:
-                logger.error("拉取B站动态失败: %s", e)
-                self._last_poll["error"] = str(e)[:200]
-                self._backoff_level = policy.next_backoff_level(self._backoff_level)
-                return
+            items, source = await self._fetch_with_fallback(mode)
+        except BiliAPIError:
+            return
         except Exception as e:  # noqa: BLE001
-            logger.error("拉取B站动态未知异常: %s", e)
+            logger.error("拉取B站动态未知异常: %s", e, exc_info=True)
             self._last_poll["error"] = str(e)[:200]
             self._backoff_level = policy.next_backoff_level(self._backoff_level)
             return
@@ -818,12 +979,40 @@ class BiliDynamicWatcherPlugin(star.Star):
             self.config.get("bdw_backoff_max", DEFAULT_BACKOFF_MAX)
             or DEFAULT_BACKOFF_MAX
         )
+        cookie_status = self._http.cookie_status() if self._http else {}
+        if cookie_status:
+            last_check = (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._cookie_last_check))
+                if self._cookie_last_check
+                else "尚未检查"
+            )
+            last_ok = (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._cookie_last_ok))
+                if self._cookie_last_ok
+                else "尚未成功刷新"
+            )
+            using_store = bool(self._cookie_store) and str(
+                self._cookie_store.get("base_sessdata") or ""
+            ).strip() == str(self.config.get("bdw_sessdata", "") or "").strip()
+            cookie_text = (
+                f"{'开启' if self._cookie_refresh_enabled() else '关闭'}"
+                f"（bili_jct {'有' if cookie_status.get('has_bili_jct') else '无'}，"
+                f"refresh_token {'有' if cookie_status.get('has_refresh_token') else '无'}；"
+                f"已刷新 {cookie_status.get('refresh_count', 0)} 次，"
+                f"最近刷新 {last_ok}，最近检查 {last_check}；"
+                f"登录态来源 {'本地刷新缓存' if using_store else '插件配置'}"
+                + (f"；错误：{self._cookie_last_error}" if self._cookie_last_error else "")
+                + "）"
+            )
+        else:
+            cookie_text = "未初始化"
         lines = [
             "B站动态监听状态：",
             f"- 总开关：{'开启' if bool(self.config.get('bdw_enabled', True)) else '关闭'}",
             f"- 模式：{self.config.get('bdw_mode', 'auto') or 'auto'}（auto=follow+RSS兜底）",
             f"- 数据源：{self._last_source or '（尚未轮询）'}",
             f"- SESSDATA：{sess_masked}",
+            f"- Cookie 自动刷新：{cookie_text}",
             f"- 轮询间隔：基础 {base_iv} 秒，退避级别 {self._backoff_level}，"
             f"当前实际 {int(policy.effective_interval(base_iv, self._backoff_level, cap_iv))} 秒",
             f"- WBI 签名：{self._wbi_text()}",
@@ -896,6 +1085,52 @@ class BiliDynamicWatcherPlugin(star.Star):
                 f" {DYNAMIC_TYPE_NAMES.get(dtype, dtype)} id={item.get('id_str')}"
             )
         yield event.make_result().message("\n".join(lines))
+
+    @filter.command("bd刷新")
+    async def bd_refresh(self, event: AstrMessageEvent):
+        """立即检查并刷新 B 站 Cookie（需 bili_jct + refresh_token）。"""
+        denied = self._check_manage_permission(event)
+        if denied:
+            event.stop_event()
+            yield event.make_result().message(denied)
+            return
+        if not self._http:
+            event.stop_event()
+            yield event.make_result().message("插件尚未初始化完成，请稍后重试。")
+            return
+        if not self._cookie_refresh_enabled():
+            event.stop_event()
+            yield event.make_result().message(
+                "Cookie 自动刷新已在配置中关闭（bdw_cookie_refresh=false）。"
+            )
+            return
+        stat = self._http.cookie_status()
+        missing = []
+        if not stat.get("has_sessdata"):
+            missing.append("bdw_sessdata")
+        if not stat.get("has_bili_jct"):
+            missing.append("bdw_bili_jct")
+        if not stat.get("has_refresh_token"):
+            missing.append("bdw_refresh_token")
+        if missing:
+            event.stop_event()
+            yield event.make_result().message(
+                "缺少刷新所需配置：" + "、".join(missing)
+                + "\n其中 bdw_refresh_token 需从浏览器 F12 → Application →"
+                " Local Storage → https://www.bilibili.com → ac_time_value 复制。"
+            )
+            return
+        ok = await self._do_refresh_cookie("手动触发")
+        event.stop_event()
+        if ok:
+            yield event.make_result().message(
+                "Cookie 刷新成功：SESSDATA / bili_jct 已更新并持久化，"
+                "后续轮询将使用新的登录态。"
+            )
+        else:
+            yield event.make_result().message(
+                f"Cookie 刷新失败：{self._cookie_last_error or '未知错误'}"
+            )
 
     # ------------------------------------------------------------------
     # 权限

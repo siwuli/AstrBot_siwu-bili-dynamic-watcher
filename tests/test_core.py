@@ -15,6 +15,7 @@ import policy  # noqa: E402
 import rss_feed  # noqa: E402
 import wbi  # noqa: E402
 import rules  # noqa: E402
+import cookie_refresh  # noqa: E402
 
 # bili_api.py 内部使用相对导入（from . import wbi），测试时把它作为一个包导入
 import types  # noqa: E402
@@ -169,6 +170,10 @@ class TestBiliApi(unittest.TestCase):
             "SESSDATA=abc; buvid3=111; buvid4=222",
         )
         self.assertEqual(build_cookie_header("abc", ""), "SESSDATA=abc")
+        self.assertEqual(
+            build_cookie_header("ss", "b3", "b4", "jct", "uid"),
+            "SESSDATA=ss; bili_jct=jct; DedeUserID=uid; buvid3=b3; buvid4=b4",
+        )
 
     def test_risk_error(self):
         err = BiliAPIError("风控", code=-352, risk=True)
@@ -261,6 +266,66 @@ class TestRules(unittest.TestCase):
         ok, reason = rules.should_push(item, {})
         self.assertTrue(ok)
         self.assertEqual(reason, "")
+
+
+try:
+    from cryptography.hazmat.primitives import hashes as _c_hashes  # noqa: E402
+    from cryptography.hazmat.primitives import serialization as _c_ser  # noqa: E402
+    from cryptography.hazmat.primitives.asymmetric import padding as _c_padding  # noqa: E402
+    from cryptography.hazmat.primitives.asymmetric import rsa as _c_rsa  # noqa: E402
+
+    _CRYPTO_OK = True
+except ImportError:  # pragma: no cover - 运行环境无 cryptography 时跳过
+    _CRYPTO_OK = False
+
+
+class TestCookieRefresh(unittest.TestCase):
+    """Cookie 刷新链路（RSA-OAEP / CorrespondPath / refresh_csrf 解析）。"""
+
+    def test_correspond_path_shape(self):
+        seed = bytes(range(32))
+        path = cookie_refresh.get_correspond_path(1700000000000, seed=seed)
+        # 1024bit RSA → 128 字节密文 → 256 位小写 hex
+        self.assertEqual(len(path), 256)
+        self.assertEqual(path, path.lower())
+        self.assertTrue(all(c in "0123456789abcdef" for c in path))
+        # 同一时间戳 + 同一 seed → 结果稳定
+        self.assertEqual(
+            path, cookie_refresh.get_correspond_path(1700000000000, seed=seed)
+        )
+
+    def test_parse_refresh_csrf(self):
+        html = '<div id="1-name">b0cc8411ded2f9db2cff2edb3123acac</div>'
+        self.assertEqual(
+            cookie_refresh.parse_refresh_csrf(html), "b0cc8411ded2f9db2cff2edb3123acac"
+        )
+        self.assertEqual(cookie_refresh.parse_refresh_csrf("<html>404</html>"), "")
+
+    @unittest.skipUnless(_CRYPTO_OK, "cryptography 不可用")
+    def test_public_key_matches_doc_pem(self):
+        pub = _c_ser.load_pem_public_key(cookie_refresh.PUBLIC_KEY_PEM.encode())
+        nums = pub.public_numbers()
+        self.assertEqual(nums.n, cookie_refresh.MODULUS_N)
+        self.assertEqual(nums.e, cookie_refresh.PUBLIC_KEY_E)
+        self.assertEqual(nums.n.bit_length(), 1024)
+
+    @unittest.skipUnless(_CRYPTO_OK, "cryptography 不可用")
+    def test_oaep_roundtrip(self):
+        key = _c_rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        pn = key.private_numbers().public_numbers
+        message = b"refresh_1700000000000"
+        cipher = cookie_refresh.rsa_oaep_encrypt(
+            message, n=pn.n, e=pn.e, seed=bytes(range(32))
+        )
+        plain = key.decrypt(
+            cipher,
+            _c_padding.OAEP(
+                mgf=_c_padding.MGF1(algorithm=_c_hashes.SHA256()),
+                algorithm=_c_hashes.SHA256(),
+                label=None,
+            ),
+        )
+        self.assertEqual(plain, message)
 
 
 if __name__ == "__main__":

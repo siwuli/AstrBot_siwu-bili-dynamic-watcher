@@ -2,8 +2,8 @@ name: bili_dynamic_watcher
 display_name: B站动态监听
 short_desc: 监听B站UP主/微博动态推送QQ群（带图片），转发/抽奖默认忽略，WBI签名+退避+RSS兜底（v2.1）
 desc: "监听 B 站 UP 主与 RSS 源（含微博）的新动态，把动态与图片推送到群，可配官方接口或 RSS 兜底"
-help: "指令：bd列表 / bd本群 / bd添加 <UID> [备注] / bd删除 <UID> / bd状态 / bd测试（需 @ 或唤醒词；管理指令需管理员权限）"
-version: 2.2.2
+help: "指令：bd列表 / bd本群 / bd添加 <UID> [备注] / bd删除 <UID> / bd状态 / bd测试 / bd刷新（需 @ 或唤醒词；管理指令需管理员权限）"
+version: 2.3.0
 author: siwuli
 repo: https://github.com/siwuli/AstrBot_siwu-bili-dynamic-watcher
 astrbot_version: ">=4.0.0"
